@@ -5,7 +5,7 @@ from collections import deque
 import gym
 from gym import spaces
 import cv2
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, GameVariable, Button, AutomapMode, Mode, doom_fixed_to_double
 import skimage.transform
 
 cv2.ocl.setUseOpenCL(False)
@@ -58,7 +58,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="deadly_corridor",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=2e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -125,8 +125,9 @@ args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
 
+
 class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
+    def __init__(self, seed, game_config, render, reward_scale, frame_skip):
         # assign observation space
         channel_num = 3
 
@@ -146,46 +147,50 @@ class ViZDoomEnv:
             actions[i][i] = True
         self.actions = actions
         self.frame_skip = frame_skip
-
         game.set_seed(seed)
-        random.seed(seed)
         game.set_window_visible(render)
         game.init()
 
         self.game = game
+        self.last_total_kills = None
+        self.last_total_health = None
 
     def get_current_input(self):
         state = self.game.get_state()
-
         res_source = []
         res_source.append(state.screen_buffer)
-
         res = np.vstack(res_source)
         res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
         self.last_input = res
         return res
 
-    def step_with_skip(self, action):
-        reward_acc = 0
-        ob = self.last_input
+    def get_health_reward(self):
+        if self.last_total_health == None:
+            d_health = 0
+        else:
+            d_health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
+        self.last_total_health = self.game.get_game_variable(GameVariable.HEALTH)
+        return d_health  if d_health < 0 else 0
 
-        for i in range(self.frame_skip + 1):
-            reward = self.game.make_action(self.actions[action])
-            reward_acc += reward
-            done = self.game.is_episode_finished()
-
-            if done:
-                break
-            else:
-                ob = self.get_current_input()
-
-        return ob, reward_acc, done
+    def get_kill_reward(self):
+        if self.last_total_kills == None:
+            d_kill = 0
+        else:
+            d_kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
+        self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
+        return d_kill * 5 if d_kill > 0 else 0
 
     def step(self, action):
         info = {}
-        ob, reward, done = self.step_with_skip(action)
+        reward = self.game.make_action(self.actions[action], self.frame_skip)
+        done = self.game.is_episode_finished()
+        if done:
+            ob = self.last_input
+        else:
+            ob = self.get_current_input()
         # reward scaling
-        reward = reward * self.reward_scale
+        print(self.get_health_reward())
+        reward = (reward  + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 
@@ -242,9 +247,10 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
+print(device)
 def make_env(seed):
     def thunk():
-        env = ViZDoomEnv(seed, args.gym_id, render=False, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
+        env = ViZDoomEnv(seed, args.gym_id, render=True, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
