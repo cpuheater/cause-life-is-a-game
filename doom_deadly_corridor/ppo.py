@@ -58,7 +58,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="deadly_corridor",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2e-4,
+    parser.add_argument('--learning-rate', type=float, default=6e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -189,7 +189,6 @@ class ViZDoomEnv:
         else:
             ob = self.get_current_input()
         # reward scaling
-        print(self.get_health_reward())
         reward = (reward  + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
