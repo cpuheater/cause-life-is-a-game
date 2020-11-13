@@ -5,7 +5,7 @@ from collections import deque
 import gym
 from gym import spaces
 import cv2
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, GameVariable
 import skimage.transform
 
 cv2.ocl.setUseOpenCL(False)
@@ -57,7 +57,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="deadly_corridor",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=1e-4,
+    parser.add_argument('--learning-rate', type=float, default=2e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -87,7 +87,7 @@ if __name__ == "__main__":
                         help='the number of mini batch')
     parser.add_argument('--num-envs', type=int, default=16,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=5,
+    parser.add_argument('--num-steps', type=int, default=8,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -147,12 +147,13 @@ class ViZDoomEnv:
             actions[i][i] = True
         self.actions = actions
         self.frame_skip = frame_skip
-
         game.set_seed(seed)
         game.set_window_visible(render)
         game.init()
 
         self.game = game
+        self.last_total_kills = None
+        self.last_total_health = None
 
     def get_current_input(self):
         state = self.game.get_state()
@@ -163,6 +164,22 @@ class ViZDoomEnv:
         self.last_input = res
         return res
 
+    def get_health_reward(self):
+        if self.last_total_health == None:
+            d_health = 0
+        else:
+            d_health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
+        self.last_total_health = self.game.get_game_variable(GameVariable.HEALTH)
+        return d_health  if d_health < 0 else 0
+
+    def get_kill_reward(self):
+        if self.last_total_kills == None:
+            d_kill = 0
+        else:
+            d_kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
+        self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
+        return d_kill * 5 if d_kill > 0 else 0
+
     def step(self, action):
         info = {}
         reward = self.game.make_action(self.actions[action], self.frame_skip)
@@ -172,7 +189,7 @@ class ViZDoomEnv:
         else:
             ob = self.get_current_input()
         # reward scaling
-        reward = reward * self.reward_scale
+        reward = (reward  + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 
