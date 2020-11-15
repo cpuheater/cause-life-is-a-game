@@ -87,7 +87,7 @@ if __name__ == "__main__":
                         help='the number of mini batch')
     parser.add_argument('--num-envs', type=int, default=16,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=8,
+    parser.add_argument('--num-steps', type=int, default=5,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -119,8 +119,8 @@ if __name__ == "__main__":
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    #if not args.seed:
+    args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
@@ -142,9 +142,14 @@ class ViZDoomEnv:
 
         num_buttons = game.get_available_buttons_size()
         self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
+        actions = [
+            [True, False, True, False, False, False],
+            [False, True, True, False, False, False],
+            [False, False, True, False, False, False],
+            [False, False, True, True, False, False],
+            [False, False, True, False, True, False],
+            [False, False, True, False, False, True]
+        ]
         self.actions = actions
         self.frame_skip = frame_skip
         game.set_seed(seed)
@@ -166,19 +171,19 @@ class ViZDoomEnv:
 
     def get_health_reward(self):
         if self.last_total_health == None:
-            d_health = 0
+            health = 0
         else:
-            d_health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
+            health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
         self.last_total_health = self.game.get_game_variable(GameVariable.HEALTH)
-        return d_health  if d_health < 0 else 0
+        return health  if health < 0 else 0
 
     def get_kill_reward(self):
         if self.last_total_kills == None:
-            d_kill = 0
+            kill = 0
         else:
-            d_kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
+            kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
         self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
-        return d_kill * 5 if d_kill > 0 else 0
+        return kill * 5 if kill > 0 else 0
 
     def step(self, action):
         info = {}
@@ -189,7 +194,7 @@ class ViZDoomEnv:
         else:
             ob = self.get_current_input()
         # reward scaling
-        reward = (reward  + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
+        reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 

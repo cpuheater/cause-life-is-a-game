@@ -139,12 +139,23 @@ class ViZDoomEnv:
         game.load_config(f"./{game_config}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
-
+        print(game.get_available_buttons())
         num_buttons = game.get_available_buttons_size()
         self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
+        #[Button.MOVE_LEFT, Button.MOVE_RIGHT, Button.ATTACK, Button.MOVE_FORWARD, Button.TURN_LEFT, Button.TURN_RIGHT]
+        #actions = [([False] * num_buttons) for i in range(num_buttons)]
+        #for i in range(num_buttons):
+        #    actions[i][i] = True
+
+        actions = [
+            [True, False, True, False, False, False],
+            [False, True, True, False, False, False],
+            [False, False, True, False, False, False],
+            [False, False, True, True, False, False],
+            [False, False, True, False, True, False],
+            [False, False, True, False, False, True]
+        ]
+
         self.actions = actions
         self.frame_skip = frame_skip
         game.set_seed(seed)
@@ -166,19 +177,19 @@ class ViZDoomEnv:
 
     def get_health_reward(self):
         if self.last_total_health == None:
-            d_health = 0
+            health = 0
         else:
-            d_health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
+            health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
         self.last_total_health = self.game.get_game_variable(GameVariable.HEALTH)
-        return d_health  if d_health < 0 else 0
+        return health  if health < 0 else 0
 
     def get_kill_reward(self):
         if self.last_total_kills == None:
-            d_kill = 0
+            kill = 0
         else:
-            d_kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
+            kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
         self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
-        return d_kill * 5 if d_kill > 0 else 0
+        return kill * 5 if kill > 0 else 0
 
     def step(self, action):
         info = {}
@@ -189,7 +200,7 @@ class ViZDoomEnv:
         else:
             ob = self.get_current_input()
         # reward scaling
-        reward = (reward  + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
+        reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 
