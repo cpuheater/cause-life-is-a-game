@@ -56,7 +56,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="my_health",
+    parser.add_argument('--gym-id', type=str, default="health_gathering",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -244,7 +244,7 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
-        env = ViZDoomEnv(seed, args.gym_id, render=False, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
+        env = ViZDoomEnv(seed, args.gym_id, render=True, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env

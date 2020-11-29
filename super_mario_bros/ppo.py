@@ -7,15 +7,13 @@ from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, GameVariable, Button, AutomapMode, Mode, doom_fixed_to_double
 import skimage.transform
+from nes_py.wrappers import JoypadSpace #A
+import gym_super_mario_bros
+from gym_super_mario_bros.actions import SIMPLE_MOVEMENT, COMPLEX_MOVEMENT #B
 
 cv2.ocl.setUseOpenCL(False)
 
-
 class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
-
     def __init__(self, env):
         super(ImageToPyTorch, self).__init__(env)
         old_shape = self.observation_space.shape
@@ -29,8 +27,17 @@ class ImageToPyTorch(gym.ObservationWrapper):
     def observation(self, observation):
         return np.transpose(observation, axes=(2, 0, 1))
 
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
+class ResizeWrapper(gym.ObservationWrapper):
+    def __init__(self, env, dim=42):
+        gym.ObservationWrapper.__init__(self, env)
+        self.width = dim
+        self.height = dim
+        self.observation_space = spaces.Box(low=0, high=255,
+            shape=(3, self.height, self.width), dtype=np.uint8)
+
+    def observation(self, obs):
+        obs = skimage.transform.resize(obs, (3, 42, 42), preserve_range=True)
+        return obs
 
 import torch
 import torch.nn as nn
@@ -56,7 +63,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="deadly_corridor",
+    parser.add_argument('--gym-id', type=str, default="SuperMarioBros-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=6e-4,
                         help='the learning rate of the optimizer')
@@ -124,103 +131,6 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-
-
-class ViZDoomEnv:
-    def __init__(self, seed, game_config, render, reward_scale, frame_skip):
-        # assign observation space
-        channel_num = 3
-
-        self.observation_shape = (channel_num, 64, 112)
-        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
-        self.reward_scale = reward_scale
-        game = DoomGame()
-
-        game.load_config(f"./{game_config}.cfg")
-        game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.CRCGCB)
-        print(game.get_available_buttons())
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        #[Button.MOVE_LEFT, Button.MOVE_RIGHT, Button.ATTACK, Button.MOVE_FORWARD, Button.TURN_LEFT, Button.TURN_RIGHT]
-        #actions = [([False] * num_buttons) for i in range(num_buttons)]
-        #for i in range(num_buttons):
-        #    actions[i][i] = True
-
-        actions = [
-            [True, False, True, False, False, False],
-            [False, True, True, False, False, False],
-            [False, False, True, False, False, False],
-            [False, False, True, True, False, False],
-            [False, False, True, False, True, False],
-            [False, False, True, False, False, True]
-        ]
-
-        self.actions = actions
-        self.frame_skip = frame_skip
-        game.set_seed(seed)
-        game.set_window_visible(render)
-        game.init()
-
-        self.game = game
-        self.last_total_kills = None
-        self.last_total_health = None
-
-    def get_current_input(self):
-        state = self.game.get_state()
-        res_source = []
-        res_source.append(state.screen_buffer)
-        res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
-        self.last_input = res
-        return res
-
-    def get_health_reward(self):
-        if self.last_total_health == None:
-            health = 0
-        else:
-            health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
-        self.last_total_health = self.game.get_game_variable(GameVariable.HEALTH)
-        return health  if health < 0 else 0
-
-    def get_kill_reward(self):
-        if self.last_total_kills == None:
-            kill = 0
-        else:
-            kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
-        self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
-        return kill * 5 if kill > 0 else 0
-
-    def step(self, action):
-        info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
-        done = self.game.is_episode_finished()
-        if done:
-            ob = self.last_input
-        else:
-            ob = self.get_current_input()
-        # reward scaling
-        reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
-        self.total_reward += reward
-        self.total_length += 1
-
-        if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
-
-        return ob, reward, done, info
-
-    def reset(self):
-        self.game.new_episode()
-        self.total_reward = 0
-        self.total_length = 0
-        ob = self.get_current_input()
-        return ob
-
-    def close(self):
-        self.game.close()
-
-
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
         super(VecPyTorch, self).__init__(venv)
@@ -260,7 +170,11 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 print(device)
 def make_env(seed):
     def thunk():
-        env = ViZDoomEnv(seed, args.gym_id, render=True, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
+        env = gym_super_mario_bros.make(args.gym_id)
+        env.seed(seed)
+        env = JoypadSpace(env, COMPLEX_MOVEMENT)
+        env = ImageToPyTorch(env)
+        env = ResizeWrapper(env)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
@@ -293,17 +207,19 @@ class Agent(nn.Module):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),
-            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(frames, 32, 3, stride=2, padding=1)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            layer_init(nn.Conv2d(32, 32, 3, stride=2, padding=1)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            layer_init(nn.Conv2d(32, 32, 3, stride=2, padding=1)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 32, 3, stride=2, padding=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(288, 512)),
             nn.ReLU()
         )
-        #conv_input = torch.Tensor(torch.randn((1, 3, 64, 112)))
+        #conv_input = torch.Tensor(torch.randn((1, 3, 42, 42)))
         #print(conv_input.size(), self.network(conv_input).size())
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
@@ -331,7 +247,7 @@ if args.anneal_lr:
 
 # ALGO Logic: Storage for epoch data
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
+actions = torch.zeros((args.num_steps, args.num_envs)).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -344,6 +260,7 @@ global_step = 0
 next_obs = envs.reset()
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
+
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
     if args.anneal_lr:
@@ -368,7 +285,7 @@ for update in range(1, num_updates+1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-
+        print(f"{rewards[step]}")
         #for info in infos:
         #    if 'episode' in info.keys():
         #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
@@ -377,8 +294,10 @@ for update in range(1, num_updates+1):
         for info in infos:
             if 'Episode_Total_Reward' in info.keys():
                 writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
+                print(f"{info['Episode_Total_Reward']}")
             if 'Episode_Total_Len' in info.keys():
                 writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
+
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
@@ -411,7 +330,7 @@ for update in range(1, num_updates+1):
     # flatten the batch
     b_obs = obs.reshape((-1,)+envs.observation_space.shape)
     b_logprobs = logprobs.reshape(-1)
-    b_actions = actions.reshape((-1,)+envs.action_space.shape)
+    b_actions = actions.reshape(-1)
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
