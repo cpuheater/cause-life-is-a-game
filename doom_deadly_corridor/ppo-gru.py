@@ -57,7 +57,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="deadly_corridor",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=6e-4,
+    parser.add_argument('--learning-rate', type=float, default=7e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -131,7 +131,7 @@ class ViZDoomEnv:
         # assign observation space
         channel_num = 3
 
-        self.observation_shape = (channel_num, 84, 84)
+        self.observation_shape = (channel_num,  64, 112)
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
         self.reward_scale = reward_scale
         game = DoomGame()
@@ -345,7 +345,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(3136, rnn_hidden_size)),
+            layer_init(nn.Linear(2560, rnn_hidden_size)),
             nn.ReLU()
         )
 
