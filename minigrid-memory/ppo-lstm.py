@@ -5,7 +5,7 @@ from collections import deque
 import gym
 from gym import spaces
 import cv2
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, GameVariable
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
 
 cv2.ocl.setUseOpenCL(False)
@@ -55,9 +55,9 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="deadly_corridor",
+    parser.add_argument('--gym-id', type=str, default="basic",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=5e-4,
+    parser.add_argument('--learning-rate', type=float, default=6e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -79,7 +79,7 @@ if __name__ == "__main__":
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
-    parser.add_argument('--rnn-hidden-size', type=int, default=512,
+    parser.add_argument('--rnn-hidden-size', type=int, default=256,
                         help='rnn hidden size')
     parser.add_argument('--seq-length', type=int, default=8,
                         help='seq length')
@@ -87,15 +87,15 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=8,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=16,
+    parser.add_argument('--num-envs', type=int, default=8,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=256,
+    parser.add_argument('--num-steps', type=int, default=8,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
     parser.add_argument('--gae-lambda', type=float, default=0.95,
                         help='the lambda for the general advantage estimation')
-    parser.add_argument('--ent-coef', type=float, default=0.0,
+    parser.add_argument('--ent-coef', type=float, default=0.01,
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
@@ -113,7 +113,7 @@ if __name__ == "__main__":
                          help='the target-kl variable that is referred by --kl')
     parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                          help='Use GAE for advantage computation')
-    parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
+    parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help="Toggle learning rate annealing for policy and value networks")
@@ -121,45 +121,40 @@ if __name__ == "__main__":
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
-    #if not args.seed:
-    args.seed = int(time.time())
+    if not args.seed:
+        args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
+
 class ViZDoomEnv:
-    def __init__(self, seed, game_config, render, reward_scale, frame_skip):
+    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
         # assign observation space
         channel_num = 3
 
-        self.observation_shape = (channel_num,  64, 112)
+        self.observation_shape = (channel_num, 64, 112)
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
         self.reward_scale = reward_scale
         game = DoomGame()
 
-        game.load_config(f"./{game_config}.cfg")
+        game.load_config(f"./scenarios/{game_config}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
 
         num_buttons = game.get_available_buttons_size()
         self.action_space = Discrete(num_buttons)
-        actions = [
-            [True, False, True, False, False, False],
-            [False, True, True, False, False, False],
-            [False, False, True, False, False, False],
-            [False, False, True, True, False, False],
-            [False, False, True, False, True, False],
-            [False, False, True, False, False, True]
-        ]
+        actions = [([False] * num_buttons) for i in range(num_buttons)]
+        for i in range(num_buttons):
+            actions[i][i] = True
         self.actions = actions
         self.frame_skip = frame_skip
+
         game.set_seed(seed)
         game.set_window_visible(render)
         game.init()
 
         self.game = game
-        self.last_total_kills = None
-        self.last_total_health = None
 
     def get_current_input(self):
         state = self.game.get_state()
@@ -170,22 +165,6 @@ class ViZDoomEnv:
         self.last_input = res
         return res
 
-    def get_health_reward(self):
-        if self.last_total_health == None:
-            health = 0
-        else:
-            health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
-        self.last_total_health = self.game.get_game_variable(GameVariable.HEALTH)
-        return health  if health < 0 else 0
-
-    def get_kill_reward(self):
-        if self.last_total_kills == None:
-            kill = 0
-        else:
-            kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
-        self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
-        return kill * 5 if kill > 0 else 0
-
     def step(self, action):
         info = {}
         reward = self.game.make_action(self.actions[action], self.frame_skip)
@@ -195,7 +174,7 @@ class ViZDoomEnv:
         else:
             ob = self.get_current_input()
         # reward scaling
-        reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
+        reward = reward * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 
@@ -214,6 +193,7 @@ class ViZDoomEnv:
 
     def close(self):
         self.game.close()
+
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -377,7 +357,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         # Apply zero-padding to ensure that each episode has the same length
         # Therfore we can train batches of episodes in parallel instead of one episode at a time
         for i, sequence in enumerate(sequences):
-            sequences[i] = pad_sequence(sequence, max_sequence_length)
+            sequences[i] =  pad_sequence(sequence, max_sequence_length)
 
         # Stack episodes (target shape: (Episode, Step, Data ...) & apply data to the samples dict
         samples[key] = np.stack(sequences, axis=0)
@@ -417,6 +397,9 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         start = end
         yield mini_batch
 
+def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
+
 def init_recurrent_cell_states(num_sequences):
         hxs = torch.zeros((num_sequences), args.rnn_hidden_size, dtype=torch.float32, device=device, requires_grad=True).unsqueeze(0).to(device)
         cxs = torch.zeros((num_sequences), args.rnn_hidden_size, dtype=torch.float32, device=device, requires_grad=True).unsqueeze(0).to(device)
@@ -441,9 +424,6 @@ def pad_sequence(sequence, target_length):
         padding = np.full(delta_length, sequence[0], dtype=sequence.dtype)
     # Concatenate the zeros to the sequence
     return np.concatenate((padding, sequence), axis=0)
-
-def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
 
 
 agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=args.rnn_hidden_size).to(device)
@@ -579,6 +559,7 @@ for update in range(1, num_updates+1):
                 v_loss = 0.5 * v_loss_max.mean()
             else:
                 v_loss = 0.5 * ((new_values - b_returns) ** 2).mean()
+
             pg_loss = masked_mean(pg_loss, batch["loss_mask"])
             v_loss = masked_mean(v_loss, batch["loss_mask"])
             entropy_loss = masked_mean(entropy_loss, batch["loss_mask"])
