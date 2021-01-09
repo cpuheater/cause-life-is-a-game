@@ -7,7 +7,9 @@ from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
-
+from minigrid_wrapper import MinigridWrapper
+from scaled_visual_observation import ScaledVisualObsEnv
+from pytorch_shape import PyTorchEnv
 cv2.ocl.setUseOpenCL(False)
 
 
@@ -86,7 +88,7 @@ if __name__ == "__main__":
                         help='the number of mini batch')
     parser.add_argument('--num-envs', type=int, default=8,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=128,
+    parser.add_argument('--num-steps', type=int, default=256,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -191,6 +193,12 @@ class ViZDoomEnv:
     def close(self):
         self.game.close()
 
+def wrap_environment(realtime_mode=False):
+    env = MinigridWrapper("MiniGrid-DoorKey-5x5-v0", realtime_mode=realtime_mode)
+
+    env = ScaledVisualObsEnv(env, 84, 84)
+    return PyTorchEnv(env)
+
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
         super(VecPyTorch, self).__init__(venv)
@@ -229,9 +237,10 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
-        env = ViZDoomEnv(seed, args.gym_id, render=False, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
+        #env = ViZDoomEnv(seed, args.gym_id, render=False, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
+        env = wrap_environment()
+        #env.action_space.seed(seed)
+        #env.observation_space.seed(seed)
         return env
     return thunk
 
@@ -269,7 +278,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(3136, 512)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
@@ -342,10 +351,10 @@ for update in range(1, num_updates+1):
         #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
         #        break
         for info in infos:
-            if 'Episode_Total_Reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
-            if 'Episode_Total_Len' in info.keys():
-                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
+            if info and 'reward' in info.keys():
+                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
+            if info and 'length' in info.keys():
+                writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
