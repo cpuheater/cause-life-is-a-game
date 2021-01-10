@@ -7,9 +7,6 @@ from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
-from minigrid_wrapper import MinigridWrapper
-from scaled_visual_observation import ScaledVisualObsEnv
-from pytorch_shape import PyTorchEnv
 cv2.ocl.setUseOpenCL(False)
 
 
@@ -58,7 +55,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="basic",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -193,11 +190,56 @@ class ViZDoomEnv:
     def close(self):
         self.game.close()
 
-def wrap_environment(realtime_mode=False):
-    env = MinigridWrapper("MiniGrid-DoorKey-5x5-v0", realtime_mode=realtime_mode)
+class InfoWrapper(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        self._rewards = []
 
-    env = ScaledVisualObsEnv(env, 84, 84)
-    return PyTorchEnv(env)
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+
+        self._rewards = []
+        return obs
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        self._rewards.append(reward)
+        ## Retrieve the RGB frame of the agent's vision
+        #vis_obs = self._env.get_obs_render(obs["image"], tile_size=12) / 255.
+
+        ## Render the environment in realtime
+        #if self._realtime_mode:
+        #    self._env.render(tile_size=96)
+        #    time.sleep(0.5)
+
+        # Wrap up episode information once completed (i.e. done)
+        if done:
+            info = {"reward": sum(self._rewards),
+                    "length": len(self._rewards)}
+
+        return obs, reward, done, info
+
+class WarpFrame(gym.ObservationWrapper):
+    def __init__(self, env, width=84, height=84):
+        super().__init__(env)
+        self._width = width
+        self._height = height
+        num_colors = 3
+        new_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(self._height, self._width, num_colors),
+            dtype=np.uint8,
+        )
+        self.observation_space = new_space
+        original_space = self.observation_space
+        self.observation_space = new_space
+        assert original_space.dtype == np.uint8 and len(original_space.shape) == 3
+
+    def observation(self, obs):
+        frame = obs['image']
+        frame = cv2.resize(frame, (self._width, self._height), interpolation=cv2.INTER_AREA)
+        return frame
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -237,10 +279,13 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
-        #env = ViZDoomEnv(seed, args.gym_id, render=False, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
-        env = wrap_environment()
-        #env.action_space.seed(seed)
-        #env.observation_space.seed(seed)
+        env = gym.make(args.gym_id)
+        env = WarpFrame(env)
+        env = InfoWrapper(env)
+        env = wrap_pytorch(env)
+        env.seed(seed)
+        env.action_space.seed(seed)
+        env.observation_space.seed(seed)
         return env
     return thunk
 
@@ -345,11 +390,6 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
-        #for info in infos:
-        #    if 'episode' in info.keys():
-        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
-        #        break
         for info in infos:
             if info and 'reward' in info.keys():
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
