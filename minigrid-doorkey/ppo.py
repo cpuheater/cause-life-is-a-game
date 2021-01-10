@@ -7,6 +7,7 @@ from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
+from gym_minigrid.wrappers import *
 cv2.ocl.setUseOpenCL(False)
 
 
@@ -122,73 +123,6 @@ if __name__ == "__main__":
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
-
-
-class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
-        # assign observation space
-        channel_num = 3
-
-        self.observation_shape = (channel_num, 64, 112)
-        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
-        self.reward_scale = reward_scale
-        game = DoomGame()
-
-        game.load_config(f"./scenarios/{game_config}.cfg")
-        game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.CRCGCB)
-
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
-        self.frame_skip = frame_skip
-
-        game.set_seed(seed)
-        game.set_window_visible(render)
-        game.init()
-
-        self.game = game
-
-    def get_current_input(self):
-        state = self.game.get_state()
-        res_source = []
-        res_source.append(state.screen_buffer)
-        res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
-        self.last_input = res
-        return res
-
-    def step(self, action):
-        info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
-        done = self.game.is_episode_finished()
-        if done:
-            ob = self.last_input
-        else:
-            ob = self.get_current_input()
-        # reward scaling
-        reward = reward * self.reward_scale
-        self.total_reward += reward
-        self.total_length += 1
-
-        if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
-
-        return ob, reward, done, info
-
-    def reset(self):
-        self.game.new_episode()
-        self.total_reward = 0
-        self.total_length = 0
-        ob = self.get_current_input()
-        return ob
-
-    def close(self):
-        self.game.close()
 
 class InfoWrapper(gym.Wrapper):
     def __init__(self, env):
