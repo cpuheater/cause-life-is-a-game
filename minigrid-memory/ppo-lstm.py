@@ -58,7 +58,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=5e-5,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
