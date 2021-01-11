@@ -100,7 +100,7 @@ if __name__ == "__main__":
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.1,
+    parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
                          help="the K epochs to update the policy")
@@ -253,14 +253,14 @@ class Agent(nn.Module):
         self.network = nn.Sequential(
             Scale(1/255),
             layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Flatten(),
             layer_init(nn.Linear(3136, rnn_hidden_size)),
-            nn.ReLU()
+            nn.LeakyReLU()
         )
 
         self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size)
@@ -270,7 +270,7 @@ class Agent(nn.Module):
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
 
-        self.actor = layer_init(nn.Linear(rnn_hidden_size, envs.action_space.n), std=0.01)
+        self.actor = layer_init(nn.Linear(rnn_hidden_size, envs.action_space.n), std = np.sqrt(0.01))
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
     def forward(self, x, rnn_hidden_state, rnn_cell_state, sequence_length = 1):
