@@ -247,31 +247,41 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+def polynomial_decay(initial, final, max_decay_steps, power, current_step):
+    # Return the final value if max_decay_steps is reached or the initial and the final value are equal
+    if current_step > max_decay_steps or initial == final:
+        return final
+    # Return the polynomially decayed value given the current step
+    else:
+        return  ((initial - final) * ((1 - current_step / max_decay_steps) ** power) + final)
+
 class Agent(nn.Module):
     def __init__(self, envs, frames=3, rnn_input_size=512, rnn_hidden_size=512):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),
-            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(in_channels=frames, out_channels=32, kernel_size=8,
+                                 stride=4, padding=0)),
             nn.LeakyReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            layer_init(nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, padding=0)),
             nn.LeakyReLU(),
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.LeakyReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(3136, rnn_hidden_size)),
-            nn.LeakyReLU()
+            nn.Flatten()
         )
 
-        self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size)
+        self.rnn = nn.LSTM(3136, rnn_hidden_size)
         for name, param in self.rnn.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
-
-        self.actor = layer_init(nn.Linear(rnn_hidden_size, envs.action_space.n), std = np.sqrt(0.01))
-        self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
+        self.lin_hidden = layer_init(nn.Linear(rnn_hidden_size, 512))
+        self.lin_value = layer_init(nn.Linear(512, 512))
+        self.lin_policy = layer_init(nn.Linear(512, 512))
+        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=np.sqrt(0.01))
+        self.critic = layer_init(nn.Linear(512, 1), std=1)
+        self.leaky_relu = nn.LeakyReLU()
 
     def forward(self, x, rnn_hidden_state, rnn_cell_state, sequence_length = 1):
         x = self.network(x)
@@ -287,8 +297,12 @@ class Agent(nn.Module):
 
     def get_action(self, x, rnn_hidden_state, rnn_cell_state, sequence_length=1, action=None):
         x, (rnn_hidden_state, rnn_cell_state) = self.forward(x, rnn_hidden_state, rnn_cell_state, sequence_length)
-        value = self.critic(x)
-        logits = self.actor(x)
+        x = self.leaky_relu(self.lin_hidden(x))
+        value = self.leaky_relu(self.lin_value(x))
+        policy = self.leaky_relu(self.lin_policy(x))
+        logits = self.actor(policy)
+        value = self.critic(value)
+
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
@@ -296,7 +310,9 @@ class Agent(nn.Module):
 
     def get_value(self, x, rnn_hidden_state, rnn_cell_state):
         x, rnn_hidden_state = self.forward(x, rnn_hidden_state, rnn_cell_state)
-        return self.critic(x)
+        x = self.leaky_relu(self.lin_hidden(x))
+        value = self.leaky_relu(self.lin_value(x))
+        return self.critic(value)
 
 def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns):
 
@@ -442,8 +458,10 @@ for update in range(1, num_updates+1):
     if args.anneal_lr:
         frac = 1.0 - (update - 1.0) / num_updates
         lrnow = lr(frac)
+        lrnow = polynomial_decay(0.0003, 3e-5, 1000, 1.0, update)
         optimizer.param_groups[0]['lr'] = lrnow
 
+    beta = polynomial_decay(0.01, 0.001, 1000, 1.0, update)
     # TRY NOT TO MODIFY: prepare the execution of the game.
     for step in range(0, args.num_steps):
         global_step += 1 * args.num_envs
@@ -553,8 +571,8 @@ for update in range(1, num_updates+1):
                 v_loss = 0.5 * v_loss_max.mean()
             else:
                 v_loss = 0.5 * ((new_values - b_returns) ** 2).mean()
-
-            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+            #args.ent_coef
+            loss = pg_loss - beta * entropy_loss + v_loss * args.vf_coef
 
             optimizer.zero_grad()
             loss.backward()
@@ -564,9 +582,9 @@ for update in range(1, num_updates+1):
         if args.kle_stop:
             if approx_kl > args.target_kl:
                 break
-
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
+    writer.add_scalar("charts/mean_reward", np.mean(rewards.cpu().numpy()), global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
     writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
     writer.add_scalar("losses/entropy", entropy.mean().item(), global_step)
