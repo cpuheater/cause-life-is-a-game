@@ -318,12 +318,12 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
 
     # Supply training samples
     samples = {
-        'vis_obs': obs,
-        'actions': actions,
-        'values': values,
-        'log_probs': logprobs,
-        'advantages': advantages,
-        'returns': returns,
+        'vis_obs': obs.permute(1,0,2, 3, 4),
+        'actions': actions.permute(1,0),
+        'values': values.permute(1,0),
+        'log_probs': logprobs.permute(1,0),
+        'advantages': advantages.permute(1,0),
+        'returns': returns.permute(1,0),
         # The loss mask is used for masking the padding while computing the loss function.
         # This is only of significance while using recurrence.
         'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32)
@@ -517,14 +517,6 @@ for update in range(1, num_updates+1):
                 returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
             advantages = returns - values
 
-    # flatten the batch
-    b_obs = obs.reshape((-1,)+envs.observation_space.shape)
-    b_logprobs = logprobs.reshape(-1)
-    b_actions = actions.reshape((-1,)+envs.action_space.shape)
-    b_advantages = advantages.reshape(-1)
-    b_returns = returns.reshape(-1)
-    b_values = values.reshape(-1)
-
     dones_index = [[]] * dones.shape[0]
     dones.tolist()
 
@@ -538,11 +530,7 @@ for update in range(1, num_updates+1):
         dones_index[e[0]] = tmp
 
     # Optimizaing the policy and value network
-    target_agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=args.rnn_hidden_size).to(device)
-    inds = np.arange(args.batch_size,)
     for i_epoch_pi in range(args.update_epochs):
-        np.random.shuffle(inds)
-        target_agent.load_state_dict(agent.state_dict())
         data_generator = recurrent_generator(dones_index, obs, actions, logprobs, values, advantages, returns)
         for batch in data_generator:
             b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages = batch['vis_obs'], batch['actions'], batch['values'], batch['returns'], batch['log_probs'], batch['advantages']
