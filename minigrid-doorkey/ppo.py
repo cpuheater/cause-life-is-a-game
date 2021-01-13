@@ -132,15 +132,15 @@ class InfoWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
-
+        vis_obs = self.env.get_obs_render(obs["image"], tile_size=12) / 255.
         self._rewards = []
-        return obs
+        return vis_obs
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self._rewards.append(reward)
         ## Retrieve the RGB frame of the agent's vision
-        #vis_obs = self._env.get_obs_render(obs["image"], tile_size=12) / 255.
+        vis_obs = self.env.get_obs_render(obs["image"], tile_size=12) / 255.
 
         ## Render the environment in realtime
         #if self._realtime_mode:
@@ -152,7 +152,7 @@ class InfoWrapper(gym.Wrapper):
             info = {"reward": sum(self._rewards),
                     "length": len(self._rewards)}
 
-        return obs, reward, done, info
+        return vis_obs, reward, done, info
 
 class WarpFrame(gym.ObservationWrapper):
     def __init__(self, env, width=84, height=84):
@@ -174,9 +174,9 @@ class WarpFrame(gym.ObservationWrapper):
     def observation(self, obs):
         #plt.imshow(obs['image'])
         #plt.show()
-        print(obs['image'])
-        print("DUPA")
-        frame = obs['image']
+        #print(obs['image'])
+        #print("DUPA")
+        frame = obs
         frame = cv2.resize(frame, (self._width, self._height), interpolation=cv2.INTER_AREA)
         return frame
 
@@ -219,8 +219,8 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
         env = gym.make(args.gym_id)
-        env = WarpFrame(env)
         env = InfoWrapper(env)
+        env = WarpFrame(env)
         env = wrap_pytorch(env)
         env.seed(seed)
         env.action_space.seed(seed)
