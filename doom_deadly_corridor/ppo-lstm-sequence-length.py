@@ -79,9 +79,9 @@ if __name__ == "__main__":
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
-    parser.add_argument('--rnn-hidden-size', type=int, default=512,
+    parser.add_argument('--rnn-hidden-size', type=int, default=256,
                         help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=8,
+    parser.add_argument('--seq-length', type=int, default=16,
                         help='seq length')
 
     # Algorithm specific arguments
@@ -95,13 +95,13 @@ if __name__ == "__main__":
                         help='the discount factor gamma')
     parser.add_argument('--gae-lambda', type=float, default=0.95,
                         help='the lambda for the general advantage estimation')
-    parser.add_argument('--ent-coef', type=float, default=0.0,
+    parser.add_argument('--ent-coef', type=float, default=0.01,
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.1,
+    parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
                          help="the K epochs to update the policy")
@@ -111,9 +111,9 @@ if __name__ == "__main__":
                          help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
     parser.add_argument('--target-kl', type=float, default=0.03,
                          help='the target-kl variable that is referred by --kl')
-    parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
+    parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                          help='Use GAE for advantage computation')
-    parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
+    parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help="Toggle learning rate annealing for policy and value networks")
@@ -304,7 +304,7 @@ class Agent(nn.Module):
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
 
-        self.actor = layer_init(nn.Linear(rnn_hidden_size, envs.action_space.n), std=0.01)
+        self.actor = layer_init(nn.Linear(rnn_hidden_size, envs.action_space.n), std=np.sqrt(0.01))
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
     def forward(self, x, rnn_hidden_state, rnn_cell_state, sequence_length = 1):
@@ -336,12 +336,12 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
 
     # Supply training samples
     samples = {
-        'vis_obs': obs,
-        'actions': actions,
-        'values': values,
-        'log_probs': logprobs,
-        'advantages': advantages,
-        'returns': returns,
+        'vis_obs': obs.permute(1, 0, 2, 3, 4),
+        'actions': actions.permute(1, 0),
+        'values': values.permute(1, 0),
+        'log_probs': logprobs.permute(1, 0),
+        'advantages': advantages.permute(1, 0),
+        'returns': returns.permute(1, 0),
         # The loss mask is used for masking the padding while computing the loss function.
         # This is only of significance while using recurrence.
         'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32)

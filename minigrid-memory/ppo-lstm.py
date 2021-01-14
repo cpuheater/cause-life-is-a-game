@@ -58,7 +58,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=5e-5,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -247,14 +247,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-def polynomial_decay(initial, final, max_decay_steps, power, current_step):
-    # Return the final value if max_decay_steps is reached or the initial and the final value are equal
-    if current_step > max_decay_steps or initial == final:
-        return final
-    # Return the polynomially decayed value given the current step
-    else:
-        return  ((initial - final) * ((1 - current_step / max_decay_steps) ** power) + final)
-
 class Agent(nn.Module):
     def __init__(self, envs, frames=3, rnn_input_size=512, rnn_hidden_size=512):
         super(Agent, self).__init__()
@@ -316,7 +308,6 @@ class Agent(nn.Module):
 
 def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns):
 
-    # Supply training samples
     samples = {
         'vis_obs': obs.permute(1,0,2, 3, 4),
         'actions': actions.permute(1,0),
@@ -324,18 +315,14 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         'log_probs': logprobs.permute(1,0),
         'advantages': advantages.permute(1,0),
         'returns': returns.permute(1,0),
-        # The loss mask is used for masking the padding while computing the loss function.
-        # This is only of significance while using recurrence.
         'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32)
     }
 
     max_sequence_length = 1
-    # Append the index of the last element of a trajectory as well, as it "artifically" marks the end of an episode
     for w in range(args.num_envs):
         if len(episode_done_indices[w]) == 0 or episode_done_indices[w][-1] != args.num_steps - 1:
             episode_done_indices[w].append(args.num_steps - 1)
 
-    # Split vis_obs, vec_obs, values, advantages, actions and log_probs into episodes and then into sequences
     for key, value in samples.items():
         sequences = []
         for w in range(args.num_envs):
@@ -386,9 +373,6 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
     # Prepare indices, but only shuffle the episode indices and not the entire batch to ensure that sequences of episodes are maintained
     indices = np.arange(0, num_sequences * args.seq_length).reshape(num_sequences, args.seq_length)
     sequence_indices = torch.randperm(num_sequences)
-    # At this point it is assumed that all of the available training data (values, observations, actions, ...) is padded.
-
-    # Compose mini batches
     start = 0
     for num_sequences in num_sequences_per_batch:
         end = start + num_sequences
@@ -408,23 +392,15 @@ def init_recurrent_cell_states(num_sequences):
         return hxs, cxs
 
 def pad_sequence(sequence, target_length):
-    # If a tensor is provided, convert it to a numpy array
     if isinstance(sequence, torch.Tensor):
         sequence = sequence.cpu().numpy()
-    # Determine the number of zeros that have to be added to the sequence
     delta_length = target_length - len(sequence)
-    # If the sequence is already as long as the target length, don't pad
     if delta_length <= 0:
         return sequence
-    # Construct array of zeros
     if len(sequence.shape) > 1:
-        # Case: pad multi-dimensional array like visual observation
-        # padding = np.zeros(((delta_length,) + sequence.shape[1:]), dtype=sequence.dtype)
         padding = np.full(((delta_length,) + sequence.shape[1:]), sequence[0], dtype=sequence.dtype)
     else:
-        # padding = np.zeros(delta_length, dtype=sequence.dtype)
         padding = np.full(delta_length, sequence[0], dtype=sequence.dtype)
-    # Concatenate the zeros to the sequence
     return np.concatenate((padding, sequence), axis=0)
 
 rnn_hidden_size = args.rnn_hidden_size
@@ -458,10 +434,8 @@ for update in range(1, num_updates+1):
     if args.anneal_lr:
         frac = 1.0 - (update - 1.0) / num_updates
         lrnow = lr(frac)
-        lrnow = polynomial_decay(0.0003, 3e-5, 1000, 1.0, update)
         optimizer.param_groups[0]['lr'] = lrnow
 
-    beta = polynomial_decay(0.01, 0.001, 1000, 1.0, update)
     # TRY NOT TO MODIFY: prepare the execution of the game.
     for step in range(0, args.num_steps):
         global_step += 1 * args.num_envs
@@ -559,8 +533,8 @@ for update in range(1, num_updates+1):
                 v_loss = 0.5 * v_loss_max.mean()
             else:
                 v_loss = 0.5 * ((new_values - b_returns) ** 2).mean()
-            #args.ent_coef
-            loss = pg_loss - beta * entropy_loss + v_loss * args.vf_coef
+
+            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
             optimizer.zero_grad()
             loss.backward()
