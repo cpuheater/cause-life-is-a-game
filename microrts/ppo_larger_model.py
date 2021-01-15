@@ -81,8 +81,8 @@ if __name__ == "__main__":
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    #if not args.seed:
+    args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
