@@ -507,17 +507,13 @@ for update in range(1, num_updates+1):
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
 
-    dones_index = [[]] * dones.shape[0]
-    dones.tolist()
-
-    dupa = torch.nonzero(dones)
-    dupa = dupa.tolist()
-
-    for e in dupa:
-        tmp = dones_index[e[0]]
+    nonzero = torch.nonzero(dones)
+    dones_index = [[]] * dones.shape[1]
+    for index, value in zip(nonzero[:, 1], nonzero[:, 0]):
+        tmp = dones_index[index.item()]
         tmp = tmp[:]
-        tmp.append(e[1])
-        dones_index[e[0]] = tmp
+        tmp.append(value.item())
+        dones_index[index.item()] = tmp
 
     # Optimizaing the policy and value network
     target_agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=args.rnn_hidden_size).to(device)

@@ -172,10 +172,6 @@ class WarpFrame(gym.ObservationWrapper):
         assert original_space.dtype == np.uint8 and len(original_space.shape) == 3
 
     def observation(self, obs):
-        #plt.imshow(obs['image'])
-        #plt.show()
-        #print(obs['image'])
-        #print("DUPA")
         frame = obs
         frame = cv2.resize(frame, (self._width, self._height), interpolation=cv2.INTER_AREA)
         return frame

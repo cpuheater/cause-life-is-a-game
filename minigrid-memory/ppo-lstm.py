@@ -491,17 +491,13 @@ for update in range(1, num_updates+1):
                 returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
             advantages = returns - values
 
-    dones_index = [[]] * dones.shape[0]
-    dones.tolist()
-
-    dupa = torch.nonzero(dones)
-    dupa = dupa.tolist()
-
-    for e in dupa:
-        tmp = dones_index[e[0]]
+    nonzero = torch.nonzero(dones)
+    dones_index = [[]] * dones.shape[1]
+    for index, value in zip(nonzero[:, 1], nonzero[:, 0]):
+        tmp = dones_index[index.item()]
         tmp = tmp[:]
-        tmp.append(e[1])
-        dones_index[e[0]] = tmp
+        tmp.append(value.item())
+        dones_index[index.item()] = tmp
 
     # Optimizaing the policy and value network
     for i_epoch_pi in range(args.update_epochs):
