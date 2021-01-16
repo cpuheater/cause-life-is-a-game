@@ -47,7 +47,7 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=16,
+    parser.add_argument('--num-envs', type=int, default=8,
                         help='the number of parallel game environment')
     parser.add_argument('--num-steps', type=int, default=512,
                         help='the number of steps per game environment')
@@ -61,7 +61,7 @@ if __name__ == "__main__":
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.2,
+    parser.add_argument('--clip-coef', type=float, default=0.34,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
                         help="the K epochs to update the policy")
@@ -81,7 +81,7 @@ if __name__ == "__main__":
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
     parser.add_argument('--rnn-hidden-size', type=int, default=256,
                         help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=8,
+    parser.add_argument('--seq-length', type=int, default=16,
                         help='seq length')
 
     args = parser.parse_args()
