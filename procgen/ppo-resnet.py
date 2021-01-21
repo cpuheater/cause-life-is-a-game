@@ -16,6 +16,7 @@ from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
+from collections import deque
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecNormalize, VecVideoRecorder
 
 if __name__ == "__main__":
@@ -25,7 +26,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="starpilot",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=0.0005,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -81,8 +82,8 @@ if __name__ == "__main__":
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    #if not args.seed:
+    args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
@@ -192,33 +193,88 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+
+
+class Flatten(nn.Module):
+    def forward(self, x):
+        return x.reshape(x.size(0), -1)
+
+def xavier_uniform_init(module, gain=1.0):
+    if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
+        nn.init.xavier_uniform_(module.weight.data, gain)
+        nn.init.constant_(module.bias.data, 0)
+    return module
+
+class ResidualBlock(nn.Module):
+    def __init__(self,
+                 in_channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        out = nn.ReLU()(x)
+        out = self.conv1(out)
+        out = nn.ReLU()(out)
+        out = self.conv2(out)
+        return out + x
+
+class ImpalaBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ImpalaBlock, self).__init__()
+        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
+        self.res1 = ResidualBlock(out_channels)
+        self.res2 = ResidualBlock(out_channels)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)(x)
+        x = self.res1(x)
+        x = self.res2(x)
+        return x
+
+class ImpalaModel(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 **kwargs):
+        super(ImpalaModel, self).__init__()
+        self.block1 = ImpalaBlock(in_channels=in_channels, out_channels=16)
+        self.block2 = ImpalaBlock(in_channels=16, out_channels=32)
+        self.block3 = ImpalaBlock(in_channels=32, out_channels=32)
+        self.fc = nn.Linear(in_features=32 * 8 * 8, out_features=256)
+
+        self.output_dim = 256
+        self.apply(xavier_uniform_init)
+
+    def forward(self, x):
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = nn.ReLU()(x)
+        x = Flatten()(x)
+        x = self.fc(x)
+        x = nn.ReLU()(x)
+        return x
+
+
 class Agent(nn.Module):
     def __init__(self, envs, channels=3):
         super(Agent, self).__init__()
-        self.network = nn.Sequential(
-            Scale(1/255),
-            layer_init(nn.Conv2d(channels, 32, 4, stride=3)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 3, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 32, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(8*8*32, 512)),
-            nn.ReLU()
-        )
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
+        self.network = ImpalaModel(channels)
+        self.actor = layer_init(nn.Linear(self.network.output_dim, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(self.network.output_dim, 1), std=1)
 
     def forward(self, x):
+        x = x * 1/255
         return self.network(x.transpose(1,3))
 
     def get_action(self, x, action=None):
-        logits = self.actor(self.forward(x))
+        x = self.forward(x)
+        logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy()
+        return self.critic(x), action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x):
         return self.critic(self.forward(x))
@@ -236,7 +292,7 @@ logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-
+episode_reward_buffer = deque(maxlen = 40)
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 start_time = time.time()
@@ -260,9 +316,9 @@ for update in range(1, num_updates+1):
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            values[step] = agent.get_value(obs[step]).flatten()
-            action, logproba, _ = agent.get_action(obs[step])
-
+            #values[step] = agent.get_value(obs[step]).flatten()
+            value, action, logproba, _ = agent.get_action(obs[step])
+            values[step] = value.flatten()
         actions[step] = action
         logprobs[step] = logproba
 
@@ -273,6 +329,7 @@ for update in range(1, num_updates+1):
         for info in infos:
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+                episode_reward_buffer.append(info['episode']['r'])
                 writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                 break
 
@@ -325,7 +382,8 @@ for update in range(1, num_updates+1):
             if args.norm_adv:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-            _, newlogproba, entropy = agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
+            new_values, _, newlogproba, entropy = agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
+            new_values = new_values.view(-1)
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
             # Stats
@@ -338,7 +396,7 @@ for update in range(1, num_updates+1):
             entropy_loss = entropy.mean()
 
             # Value loss
-            new_values = agent.get_value(b_obs[minibatch_ind]).view(-1)
+            #new_values = agent.get_value(b_obs[minibatch_ind]).view(-1)
             if args.clip_vloss:
                 v_loss_unclipped = ((new_values - b_returns[minibatch_ind]) ** 2)
                 v_clipped = b_values[minibatch_ind] + torch.clamp(new_values - b_values[minibatch_ind], -args.clip_coef, args.clip_coef)
@@ -350,10 +408,10 @@ for update in range(1, num_updates+1):
 
             loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
-            optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
+            optimizer.zero_grad()
 
         if args.kle_stop:
             if approx_kl > args.target_kl:
@@ -364,6 +422,7 @@ for update in range(1, num_updates+1):
                 break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/mean_reward", np.mean(episode_reward_buffer), global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
     writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
