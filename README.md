@@ -1,1 +1,2 @@
-# cause-life-is-a-game
+# Cause life is a game.
+Solving games with Reinforcement Learning

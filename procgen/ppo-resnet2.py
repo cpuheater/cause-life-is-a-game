@@ -194,79 +194,89 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
-
-class Flatten(nn.Module):
-    def forward(self, x):
-        return x.reshape(x.size(0), -1)
-
-def xavier_uniform_init(module, gain=1.0):
-    if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
-        nn.init.xavier_uniform_(module.weight.data, gain)
-        nn.init.constant_(module.bias.data, 0)
-    return module
-
 class ResidualBlock(nn.Module):
-    def __init__(self,
-                 in_channels):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
+    def __init__(self, channels):
+        super().__init__()
+        self.conv0 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
 
     def forward(self, x):
-        out = nn.ReLU()(x)
-        out = self.conv1(out)
-        out = nn.ReLU()(out)
-        out = self.conv2(out)
-        return out + x
+        inputs = x
+        x = nn.functional.relu(x)
+        x = self.conv0(x)
+        x = nn.functional.relu(x)
+        x = self.conv1(x)
+        return x + inputs
 
-class ImpalaBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(ImpalaBlock, self).__init__()
-        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
-        self.res1 = ResidualBlock(out_channels)
-        self.res2 = ResidualBlock(out_channels)
+
+class ConvSequence(nn.Module):
+    def __init__(self, input_shape, out_channels):
+        super().__init__()
+        self._input_shape = input_shape
+        self._out_channels = out_channels
+        self.conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3,
+                              padding=1)
+        self.res_block0 = ResidualBlock(self._out_channels)
+        self.res_block1 = ResidualBlock(self._out_channels)
 
     def forward(self, x):
         x = self.conv(x)
-        x = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)(x)
-        x = self.res1(x)
-        x = self.res2(x)
+        x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
+        x = self.res_block0(x)
+        x = self.res_block1(x)
+        assert x.shape[1:] == self.get_output_shape()
         return x
 
-class ImpalaModel(nn.Module):
-    def __init__(self,
-                 in_channels,
-                 **kwargs):
-        super(ImpalaModel, self).__init__()
-        self.block1 = ImpalaBlock(in_channels=in_channels, out_channels=16)
-        self.block2 = ImpalaBlock(in_channels=16, out_channels=32)
-        self.block3 = ImpalaBlock(in_channels=32, out_channels=32)
-        self.fc = nn.Linear(in_features=32 * 8 * 8, out_features=256)
+    def get_output_shape(self):
+        _c, h, w = self._input_shape
+        return (self._out_channels, (h + 1) // 2, (w + 1) // 2)
 
+
+class ImpalaCNN(nn.Module):
+
+    def __init__(self):
+        super(ImpalaCNN, self).__init__()
+        h, w, c = 64, 64, 3
+        shape = (c, h, w)
+
+        conv_seqs = []
+        for out_channels in [16, 32, 32]:
+            conv_seq = ConvSequence(shape, out_channels)
+            shape = conv_seq.get_output_shape()
+            conv_seqs.append(conv_seq)
+        self.conv_seqs = nn.ModuleList(conv_seqs)
+        self.hidden_fc = nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=256)
         self.output_dim = 256
-        self.apply(xavier_uniform_init)
+        #self.logits_fc = nn.Linear(in_features=256, out_features=num_outputs)
+        #self.value_fc = nn.Linear(in_features=256, out_features=1)
 
-    def forward(self, x):
-        x = self.block1(x)
-        x = self.block2(x)
-        x = self.block3(x)
-        x = nn.ReLU()(x)
-        x = Flatten()(x)
-        x = self.fc(x)
-        x = nn.ReLU()(x)
+    def forward(self, input):
+        x = input.float()
+        x = x / 255.0  # scale to 0-1
+        x = x.permute(0, 3, 1, 2)  # NHWC => NCHW
+        for conv_seq in self.conv_seqs:
+            x = conv_seq(x)
+        x = torch.flatten(x, start_dim=1)
+        x = nn.functional.relu(x)
+        x = self.hidden_fc(x)
+        x = nn.functional.relu(x)
+        #logits = self.logits_fc(x)
+        #value = self.value_fc(x)
+        #@self._value = value.squeeze(1)
         return x
+
 
 
 class Agent(nn.Module):
     def __init__(self, envs, channels=3):
         super(Agent, self).__init__()
-        self.network = ImpalaModel(channels)
+        self.network = ImpalaCNN()
         self.actor = layer_init(nn.Linear(self.network.output_dim, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(self.network.output_dim, 1), std=1)
 
     def forward(self, x):
-        x = x/255
-        return self.network(x.transpose(1,3))
+        #x = x / 255
+        return self.network(x)
 
     def get_action(self, x, action=None):
         x = self.forward(x)
