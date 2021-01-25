@@ -11,10 +11,12 @@ import numpy as np
 import gym
 import gym_microrts
 from gym.wrappers import TimeLimit, Monitor
-
+import collections
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
+import os
+import pickle
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 
@@ -47,7 +49,7 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=16,
+    parser.add_argument('--num-envs', type=int, default=1,
                         help='the number of parallel game environment')
     parser.add_argument('--num-steps', type=int, default=512,
                         help='the number of steps per game environment')
@@ -102,6 +104,53 @@ class ImageToPyTorch(gym.ObservationWrapper):
     def observation(self, observation):
         return np.transpose(observation, axes=(2, 0, 1))
 
+Data = collections.namedtuple('Data', ['obs', 'action', 'reward'])
+
+class TrajectoryManager(object):
+
+    def __init__(self, num_envs, file_name):
+        self.dir = dir
+        self.file_name = file_name
+        self.num_envs = num_envs
+        self.trajectories = []
+        for _ in range(num_envs):
+            self.trajectories.append([])
+        self.num_episodes = 0
+        if os.path.exists(file_name):
+            with open(file_name, 'rb') as rfp:
+                self.successful_trajectories = pickle.load(rfp)
+        else:
+            self.successful_trajectories = []
+
+    def process(self, b_rewards, b_obs, b_actions, b_dones, next_done, next_obs, b_wins):
+
+        steps = b_rewards.shape[0]
+        b_rewards = b_rewards.transpose(1, 0)
+        b_dones = b_dones.transpose(1, 0)[:, 1:]
+        b_dones = np.append(b_dones, next_done)
+        b_dones = np.expand_dims(b_dones, 0)
+        b_obs = b_obs.transpose(1, 0, 2, 3, 4)
+        first_obs = b_obs[:, 0].squeeze(0)
+        b_obs = b_obs[:, 1:]
+        b_obs = np.append(b_obs, np.expand_dims(next_obs, axis=0), axis=1)
+        b_actions = b_actions.transpose(1, 0, 2)
+        b_wins = b_wins.transpose(1, 0)
+
+        for i in range(self.num_envs):
+            for j in range(steps):
+                data = Data(reward=b_rewards[i][j], obs=b_obs[i][j], action=b_actions[i][j])
+                self.trajectories[i].append(Data)
+                self.trajectories[i].insert(0, Data(obs = first_obs, action = None, reward=None))
+                if b_wins[i][j]:
+                    self.successful_trajectories.append(self.trajectories[i].copy())
+                    print(f"step {j} dones: {b_dones[i][j]} reward: {b_rewards[i][j]}")
+                    with open(self.file_name, 'wb') as wfp:
+                        pickle.dump(self.successful_trajectories, wfp)
+                    self.trajectories[i] = []
+                elif b_dones[i][j]:
+                    self.trajectories[i] = []
+
+tm = TrajectoryManager(args.num_envs, "trajectories.dat")
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -142,6 +191,8 @@ class MicroRTSStatsRecorder(gym.Wrapper):
         self.raw_rewards += [info["raw_rewards"]]
         self.discounted_rewards += [(self.gamma ** self.t) * np.concatenate((info["raw_rewards"], [reward]))]
         self.t += 1
+        if done and reward > 0:
+            print(f"dupa: {reward}")
         if done:
             raw_rewards = np.array(self.raw_rewards).sum(0)
             discounter_rewards = np.array(self.discounted_rewards).sum(0)
@@ -356,6 +407,7 @@ rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + (envs.action_space.nvec.sum(),)).to(device)
+wins = np.zeros((args.num_steps, args.num_envs))
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 start_time = time.time()
@@ -403,13 +455,15 @@ for update in range(starting_update, num_updates + 1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action.T)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-
-        for info in infos:
+        wins[step, :] = 0
+        for idx, info in enumerate(infos):
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                 writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                 for key in info['microrts_stats']:
                     writer.add_scalar(f"charts/episode_reward/{key}", info['microrts_stats'][key], global_step)
+                    if info['microrts_stats']["WinLossRewardFunction"] > 0:
+                        wins[step][idx] = 1
                 break
 
     # bootstrap reward if not done. reached the batch limit
@@ -516,6 +570,7 @@ for update in range(starting_update, num_updates + 1):
         torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
         wandb.save(f"agent.pt")
 
+    tm.process(rewards.cpu().numpy(), obs.cpu().numpy(), actions.cpu().numpy(), dones.cpu().numpy(), next_done.cpu().numpy(), next_obs.cpu().numpy(), wins)
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("charts/update", update, global_step)
