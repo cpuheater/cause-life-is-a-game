@@ -11,20 +11,19 @@ import numpy as np
 import gym
 import gym_microrts
 from gym.wrappers import TimeLimit, Monitor
-from gym_microrts.envs.vec_env import MicroRTSVecEnv
-from gym_microrts import microrts_ai
+
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
-from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="workerRushAI-reward-shaping-10.0-0.1-0.1-0.02-0.1-0.4",
+    parser.add_argument('--gym-id', type=str, default="MicrortsDefeatWorkerRushEnemyShaped-v3",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -40,7 +39,7 @@ if __name__ == "__main__":
                         help='run the script in production mode and use wandb to log outputs')
     parser.add_argument('--capture-video', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
-    parser.add_argument('--wandb-project-name', type=str, default="microrts",
+    parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
@@ -82,44 +81,27 @@ if __name__ == "__main__":
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    # if not args.seed:
+    args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-class VecMonitor(VecEnvWrapper):
-    def __init__(self, venv):
-        VecEnvWrapper.__init__(self, venv)
-        self.eprets = None
-        self.eplens = None
-        self.epcount = 0
-        self.tstart = time.time()
 
-    def reset(self):
-        obs = self.venv.reset()
-        self.eprets = np.zeros(self.num_envs, 'f')
-        self.eplens = np.zeros(self.num_envs, 'i')
-        return obs
+class ImageToPyTorch(gym.ObservationWrapper):
+    def __init__(self, env):
+        super(ImageToPyTorch, self).__init__(env)
+        old_shape = self.observation_space.shape
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=1,
+            shape=(old_shape[-1], old_shape[0], old_shape[1]),
+            dtype=np.int32,
+        )
 
-    def step_wait(self):
-        obs, rews, dones, infos = self.venv.step_wait()
-        self.eprets += rews
-        self.eplens += 1
+    def observation(self, observation):
+        return np.transpose(observation, axes=(2, 0, 1))
 
-        newinfos = list(infos[:])
-        for i in range(len(dones)):
-            if dones[i]:
-                info = infos[i].copy()
-                ret = self.eprets[i]
-                eplen = self.eplens[i]
-                epinfo = {'r': ret, 'l': eplen, 't': round(time.time() - self.tstart, 6)}
-                info['episode'] = epinfo
-                self.epcount += 1
-                self.eprets[i] = 0
-                self.eplens[i] = 0
-                newinfos[i] = info
-        return obs, rews, dones, newinfos
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -141,30 +123,34 @@ class VecPyTorch(VecEnvWrapper):
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
 
-class MicroRTSStatsRecorder(VecEnvWrapper):
+
+class MicroRTSStatsRecorder(gym.Wrapper):
+
     def __init__(self, env, gamma):
         super().__init__(env)
         self.gamma = gamma
 
-    def reset(self):
-        obs = self.venv.reset()
-        self.raw_rewards = [[] for _ in range(self.num_envs)]
-        return obs
+    def reset(self, **kwargs):
+        observation = super(MicroRTSStatsRecorder, self).reset(**kwargs)
+        self.raw_rewards = []
+        self.discounted_rewards = []
+        self.t = 0
+        return observation
 
-    def step_wait(self):
-        obs, rews, dones, infos = self.venv.step_wait()
-        for i in range(len(dones)):
-            self.raw_rewards[i] += [infos[i]["raw_rewards"]]
-        newinfos = list(infos[:])
-        for i in range(len(dones)):
-            if dones[i]:
-                info = infos[i].copy()
-                raw_rewards = np.array(self.raw_rewards[i]).sum(0)
-                raw_names = [str(rf) for rf in self.rfs]
-                info['microrts_stats'] = dict(zip(raw_names, raw_rewards))
-                self.raw_rewards[i] = []
-                newinfos[i] = info
-        return obs, rews, dones, newinfos
+    def step(self, action):
+        observation, reward, done, info = super(MicroRTSStatsRecorder, self).step(action)
+        self.raw_rewards += [info["raw_rewards"]]
+        self.discounted_rewards += [(self.gamma ** self.t) * np.concatenate((info["raw_rewards"], [reward]))]
+        self.t += 1
+        if done:
+            raw_rewards = np.array(self.raw_rewards).sum(0)
+            discounter_rewards = np.array(self.discounted_rewards).sum(0)
+            raw_names = [str(rf) for rf in self.rfs]
+            raw_names_discounted = ["discounted_" + str(rf) for rf in self.rfs] + ["discounted_episode_reward"]
+            info['microrts_stats'] = dict(
+                zip(raw_names + raw_names_discounted, np.concatenate((raw_rewards, discounter_rewards))))
+        return observation, reward, done, info
+
 
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__" + time.strftime("%d-%m-%Y_%H-%M-%S")
@@ -185,21 +171,32 @@ np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
-envs = MicroRTSVecEnv(
-    num_envs=args.num_envs,
-    max_steps=20000,
-    render_theme=2,
-    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_envs)],
-    map_path="maps/16x16/basesWorkers16x16.xml",
-    reward_weight=np.array([10.0, 0.1, 0.1, 0.02, 0.1, 0.4])
-)
-envs = MicroRTSStatsRecorder(envs, args.gamma)
-envs = VecMonitor(envs)
-envs = VecPyTorch(envs, device)
-if args.capture_video:
-    envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
-                            record_video_trigger=lambda x: x % 1000000 == 0, video_length=2000)
+
+def make_env(gym_id, seed, idx):
+    def thunk():
+        env = gym.make(gym_id)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = MicroRTSStatsRecorder(env, args.gamma)
+        env = ImageToPyTorch(env)
+        if args.capture_video:
+            if idx == 0:
+                env = Monitor(env, f'videos/{experiment_name}')
+        env.seed(seed)
+        env.action_space.seed(seed)
+        env.observation_space.seed(seed)
+        return env
+
+    return thunk
+
+
+envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed + i, i) for i in range(args.num_envs)]), device)
+# if args.prod_mode:
+#     envs = VecPyTorch(
+#         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
+#         device
+#     )
 assert isinstance(envs.action_space, MultiDiscrete), "only MultiDiscrete action space is supported"
+
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
@@ -234,84 +231,77 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+
+class Flatten(nn.Module):
+    def forward(self, x):
+        return x.reshape(x.size(0), -1)
+
+def xavier_uniform_init(module, gain=1.0):
+    if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
+        nn.init.xavier_uniform_(module.weight.data, gain)
+        nn.init.constant_(module.bias.data, 0)
+    return module
+
 class ResidualBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv0 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
-        self.conv1 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
+    def __init__(self,
+                 in_channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x):
-        inputs = x
-        x = nn.functional.relu(x)
-        x = self.conv0(x)
-        x = nn.functional.relu(x)
-        x = self.conv1(x)
-        return x + inputs
+        out = nn.ReLU()(x)
+        out = self.conv1(out)
+        out = nn.ReLU()(out)
+        out = self.conv2(out)
+        return out + x
 
-class ConvSequence(nn.Module):
-    def __init__(self, input_shape, out_channels):
-        super().__init__()
-        self._input_shape = input_shape
-        self._out_channels = out_channels
-        self.conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3,
-                              padding=1)
-        self.res_block0 = ResidualBlock(self._out_channels)
-        self.res_block1 = ResidualBlock(self._out_channels)
+class ImpalaBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ImpalaBlock, self).__init__()
+        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
+        self.res1 = ResidualBlock(out_channels)
+        self.res2 = ResidualBlock(out_channels)
 
     def forward(self, x):
         x = self.conv(x)
-        x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
-        x = self.res_block0(x)
-        x = self.res_block1(x)
-        assert x.shape[1:] == self.get_output_shape()
+        x = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)(x)
+        x = self.res1(x)
+        x = self.res2(x)
         return x
 
-    def get_output_shape(self):
-        _c, h, w = self._input_shape
-        return (self._out_channels, (h + 1) // 2, (w + 1) // 2)
+class ImpalaModel(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 **kwargs):
+        super(ImpalaModel, self).__init__()
+        self.block1 = ImpalaBlock(in_channels=in_channels, out_channels=16)
+        self.block2 = ImpalaBlock(in_channels=16, out_channels=32)
+        self.block3 = ImpalaBlock(in_channels=32, out_channels=32)
+        self.fc = nn.Linear(in_features=128, out_features=128)
 
+        self.output_dim = 128
+        self.apply(xavier_uniform_init)
 
-class ImpalaCNN(nn.Module):
-    def __init__(self):
-        super(ImpalaCNN, self).__init__()
-        h, w, c = 16, 16, 27
-        shape = (c, h, w)
-
-        conv_seqs = []
-        for out_channels in [16, 32, 32]:
-            conv_seq = ConvSequence(shape, out_channels)
-            shape = conv_seq.get_output_shape()
-            conv_seqs.append(conv_seq)
-        self.conv_seqs = nn.ModuleList(conv_seqs)
-        self.hidden_fc = nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=256)
-        self.output_dim = 256
-        #self.logits_fc = nn.Linear(in_features=256, out_features=num_outputs)
-        #self.value_fc = nn.Linear(in_features=256, out_features=1)
-
-    def forward(self, input):
-        x = input.float()
-        #x = x / 255.0  # scale to 0-1
-        #x = x.permute(0, 3, 1, 2)  # NHWC => NCHW
-        for conv_seq in self.conv_seqs:
-            x = conv_seq(x)
-        x = torch.flatten(x, start_dim=1)
-        x = nn.functional.relu(x)
-        x = self.hidden_fc(x)
-        x = nn.functional.relu(x)
-        #logits = self.logits_fc(x)
-        #value = self.value_fc(x)
-        #@self._value = value.squeeze(1)
+    def forward(self, x):
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = nn.ReLU()(x)
+        x = Flatten()(x)
+        x = self.fc(x)
+        x = nn.ReLU()(x)
         return x
 
 class Agent(nn.Module):
     def __init__(self, frames=4):
         super(Agent, self).__init__()
-        self.network = ImpalaCNN()
+        self.network = ImpalaModel(27)
         self.actor = layer_init(nn.Linear(self.network.output_dim, envs.action_space.nvec.sum()), std=0.01)
         self.critic = layer_init(nn.Linear(self.network.output_dim, 1), std=1)
 
     def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))
+        return self.network(x)
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
@@ -319,15 +309,14 @@ class Agent(nn.Module):
 
         if action is None:
             # 1. select source unit based on source unit mask
-            source_unit_mask = torch.Tensor(np.array(envs.vec_client.getUnitLocationMasks()).reshape(args.num_envs, -1))
+            source_unit_mask = torch.Tensor(np.array(envs.env_method("get_unit_location_mask", player=1)))
             multi_categoricals = [CategoricalMasked(logits=split_logits[0], masks=source_unit_mask)]
             action_components = [multi_categoricals[0].sample()]
             # 2. select action type and parameter section based on the
             #    source-unit mask of action type and parameters
-            # print(np.array(envs.vec_client.getUnitActionMasks(action_components[0].cpu().numpy())).reshape(args.num_envs, -1))
             source_unit_action_mask = torch.Tensor(
-                np.array(envs.vec_client.getUnitActionMasks(action_components[0].cpu().numpy())).reshape(args.num_envs,
-                                                                                                         -1))
+                [envs.env_method("get_unit_action_mask", unit=action_components[0][i].item(), player=1, indices=i)[0]
+                 for i in range(envs.num_envs)])
             split_suam = torch.split(source_unit_action_mask, envs.action_space.nvec.tolist()[1:], dim=1)
             multi_categoricals = multi_categoricals + [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
                                                        zip(split_logits[1:], split_suam)]
@@ -368,6 +357,7 @@ start_time = time.time()
 next_obs = envs.reset()
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
+
 ## CRASH AND RESUME LOGIC:
 starting_update = 1
 if args.prod_mode and wandb.run.resumed:
@@ -390,7 +380,7 @@ for update in range(starting_update, num_updates + 1):
 
     # TRY NOT TO MODIFY: prepare the execution of the game.
     for step in range(0, args.num_steps):
-        envs.render()
+        envs.env_method("render", indices=0)
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done

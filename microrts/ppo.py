@@ -10,9 +10,10 @@ from distutils.util import strtobool
 import numpy as np
 import gym
 import gym_microrts
-from gym.wrappers import TimeLimit, Monitor
 from gym_microrts.envs.vec_env import MicroRTSVecEnv
 from gym_microrts import microrts_ai
+from gym.wrappers import TimeLimit, Monitor
+
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
@@ -24,13 +25,13 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="workerRushAI-reward-shaping-10.0-0.1-0.1-0.02-0.1-0.4",
+    parser.add_argument('--gym-id', type=str, default="MicrortsDefeatRandomEnemyShapedReward-v3",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total-timesteps', type=int, default=100000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -40,7 +41,7 @@ if __name__ == "__main__":
                         help='run the script in production mode and use wandb to log outputs')
     parser.add_argument('--capture-video', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
-    parser.add_argument('--wandb-project-name', type=str, default="microrts",
+    parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
@@ -88,6 +89,7 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
+
 class VecMonitor(VecEnvWrapper):
     def __init__(self, venv):
         VecEnvWrapper.__init__(self, venv)
@@ -121,6 +123,7 @@ class VecMonitor(VecEnvWrapper):
                 newinfos[i] = info
         return obs, rews, dones, newinfos
 
+
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
         super(VecPyTorch, self).__init__(venv)
@@ -140,6 +143,7 @@ class VecPyTorch(VecEnvWrapper):
         obs = torch.from_numpy(obs).float().to(self.device)
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
+
 
 class MicroRTSStatsRecorder(VecEnvWrapper):
     def __init__(self, env, gamma):
@@ -166,8 +170,9 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
                 newinfos[i] = info
         return obs, rews, dones, newinfos
 
+
 # TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__" + time.strftime("%d-%m-%Y_%H-%M-%S")
+experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
     '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
@@ -184,7 +189,6 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-
 envs = MicroRTSVecEnv(
     num_envs=args.num_envs,
     max_steps=20000,
@@ -200,6 +204,7 @@ if args.capture_video:
     envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x: x % 1000000 == 0, video_length=2000)
 assert isinstance(envs.action_space, MultiDiscrete), "only MultiDiscrete action space is supported"
+
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
@@ -234,84 +239,23 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class ResidualBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv0 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
-        self.conv1 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
-
-    def forward(self, x):
-        inputs = x
-        x = nn.functional.relu(x)
-        x = self.conv0(x)
-        x = nn.functional.relu(x)
-        x = self.conv1(x)
-        return x + inputs
-
-class ConvSequence(nn.Module):
-    def __init__(self, input_shape, out_channels):
-        super().__init__()
-        self._input_shape = input_shape
-        self._out_channels = out_channels
-        self.conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3,
-                              padding=1)
-        self.res_block0 = ResidualBlock(self._out_channels)
-        self.res_block1 = ResidualBlock(self._out_channels)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
-        x = self.res_block0(x)
-        x = self.res_block1(x)
-        assert x.shape[1:] == self.get_output_shape()
-        return x
-
-    def get_output_shape(self):
-        _c, h, w = self._input_shape
-        return (self._out_channels, (h + 1) // 2, (w + 1) // 2)
-
-
-class ImpalaCNN(nn.Module):
-    def __init__(self):
-        super(ImpalaCNN, self).__init__()
-        h, w, c = 16, 16, 27
-        shape = (c, h, w)
-
-        conv_seqs = []
-        for out_channels in [16, 32, 32]:
-            conv_seq = ConvSequence(shape, out_channels)
-            shape = conv_seq.get_output_shape()
-            conv_seqs.append(conv_seq)
-        self.conv_seqs = nn.ModuleList(conv_seqs)
-        self.hidden_fc = nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=256)
-        self.output_dim = 256
-        #self.logits_fc = nn.Linear(in_features=256, out_features=num_outputs)
-        #self.value_fc = nn.Linear(in_features=256, out_features=1)
-
-    def forward(self, input):
-        x = input.float()
-        #x = x / 255.0  # scale to 0-1
-        #x = x.permute(0, 3, 1, 2)  # NHWC => NCHW
-        for conv_seq in self.conv_seqs:
-            x = conv_seq(x)
-        x = torch.flatten(x, start_dim=1)
-        x = nn.functional.relu(x)
-        x = self.hidden_fc(x)
-        x = nn.functional.relu(x)
-        #logits = self.logits_fc(x)
-        #value = self.value_fc(x)
-        #@self._value = value.squeeze(1)
-        return x
 
 class Agent(nn.Module):
     def __init__(self, frames=4):
         super(Agent, self).__init__()
-        self.network = ImpalaCNN()
-        self.actor = layer_init(nn.Linear(self.network.output_dim, envs.action_space.nvec.sum()), std=0.01)
-        self.critic = layer_init(nn.Linear(self.network.output_dim, 1), std=1)
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(32 * 6 * 6, 256)),
+            nn.ReLU(), )
+        self.actor = layer_init(nn.Linear(256, envs.action_space.nvec.sum()), std=0.01)
+        self.critic = layer_init(nn.Linear(256, 1), std=1)
 
     def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))
+        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
@@ -528,6 +472,7 @@ for update in range(starting_update, num_updates + 1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
     print("SPS:", int(global_step / (time.time() - start_time)))
 
 envs.close()
