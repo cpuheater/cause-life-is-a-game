@@ -11,25 +11,26 @@ import numpy as np
 import gym
 import gym_microrts
 from gym.wrappers import TimeLimit, Monitor
-
+from gym_microrts.envs.vec_env import MicroRTSVecEnv
+from gym_microrts import microrts_ai
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MicrortsDefeatWorkerRushEnemyShaped-v3",
+    parser.add_argument('--gym-id', type=str, default="workerRushAI-reward-shaping-10.0-0.1-0.1-0.02-0.1-0.4-lr-1.8e-4",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=1.8e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=15000000,
+    parser.add_argument('--total-timesteps', type=int, default=20000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -39,7 +40,7 @@ if __name__ == "__main__":
                         help='run the script in production mode and use wandb to log outputs')
     parser.add_argument('--capture-video', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
-    parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
+    parser.add_argument('--wandb-project-name', type=str, default="microrts",
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
@@ -47,7 +48,7 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=8,
+    parser.add_argument('--num-envs', type=int, default=16,
                         help='the number of parallel game environment')
     parser.add_argument('--num-steps', type=int, default=512,
                         help='the number of steps per game environment')
@@ -61,7 +62,7 @@ if __name__ == "__main__":
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.34,
+    parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
                         help="the K epochs to update the policy")
@@ -69,7 +70,7 @@ if __name__ == "__main__":
                         help='If toggled, the policy updates will be early stopped w.r.t target-kl')
     parser.add_argument('--kle-rollback', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
-    parser.add_argument('--target-kl', type=float, default=0.02,
+    parser.add_argument('--target-kl', type=float, default=0.03,
                         help='the target-kl variable that is referred by --kl')
     parser.add_argument('--gae', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='Use GAE for advantage computation')
@@ -81,31 +82,46 @@ if __name__ == "__main__":
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
     parser.add_argument('--rnn-hidden-size', type=int, default=256,
                         help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=128,
-                        help='seq length')
 
     args = parser.parse_args()
-    #if not args.seed:
-    args.seed = int(time.time())
+    if not args.seed:
+        args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
+class VecMonitor(VecEnvWrapper):
+    def __init__(self, venv):
+        VecEnvWrapper.__init__(self, venv)
+        self.eprets = None
+        self.eplens = None
+        self.epcount = 0
+        self.tstart = time.time()
 
-class ImageToPyTorch(gym.ObservationWrapper):
-    def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=1,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.int32,
-        )
+    def reset(self):
+        obs = self.venv.reset()
+        self.eprets = np.zeros(self.num_envs, 'f')
+        self.eplens = np.zeros(self.num_envs, 'i')
+        return obs
 
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        self.eprets += rews
+        self.eplens += 1
 
+        newinfos = list(infos[:])
+        for i in range(len(dones)):
+            if dones[i]:
+                info = infos[i].copy()
+                ret = self.eprets[i]
+                eplen = self.eplens[i]
+                epinfo = {'r': ret, 'l': eplen, 't': round(time.time() - self.tstart, 6)}
+                info['episode'] = epinfo
+                self.epcount += 1
+                self.eprets[i] = 0
+                self.eplens[i] = 0
+                newinfos[i] = info
+        return obs, rews, dones, newinfos
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -125,40 +141,35 @@ class VecPyTorch(VecEnvWrapper):
         obs, reward, done, info = self.venv.step_wait()
         obs = torch.from_numpy(obs).float().to(self.device)
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
-        print(reward)
         return obs, reward, done, info
 
-
-class MicroRTSStatsRecorder(gym.Wrapper):
-
+class MicroRTSStatsRecorder(VecEnvWrapper):
     def __init__(self, env, gamma):
         super().__init__(env)
         self.gamma = gamma
 
-    def reset(self, **kwargs):
-        observation = super(MicroRTSStatsRecorder, self).reset(**kwargs)
-        self.raw_rewards = []
-        self.discounted_rewards = []
-        self.t = 0
-        return observation
+    def reset(self):
+        obs = self.venv.reset()
+        self.raw_rewards = [[] for _ in range(self.num_envs)]
+        return obs
 
-    def step(self, action):
-        observation, reward, done, info = super(MicroRTSStatsRecorder, self).step(action)
-        self.raw_rewards += [info["raw_rewards"]]
-        self.discounted_rewards += [(self.gamma ** self.t) * np.concatenate((info["raw_rewards"], [reward]))]
-        self.t += 1
-        if done:
-            raw_rewards = np.array(self.raw_rewards).sum(0)
-            discounter_rewards = np.array(self.discounted_rewards).sum(0)
-            raw_names = [str(rf) for rf in self.rfs]
-            raw_names_discounted = ["discounted_" + str(rf) for rf in self.rfs] + ["discounted_episode_reward"]
-            info['microrts_stats'] = dict(
-                zip(raw_names + raw_names_discounted, np.concatenate((raw_rewards, discounter_rewards))))
-        return observation, reward, done, info
-
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        for i in range(len(dones)):
+            self.raw_rewards[i] += [infos[i]["raw_rewards"]]
+        newinfos = list(infos[:])
+        for i in range(len(dones)):
+            if dones[i]:
+                info = infos[i].copy()
+                raw_rewards = np.array(self.raw_rewards[i]).sum(0)
+                raw_names = [str(rf) for rf in self.rfs]
+                info['microrts_stats'] = dict(zip(raw_names, raw_rewards))
+                self.raw_rewards[i] = []
+                newinfos[i] = info
+        return obs, rews, dones, newinfos
 
 # TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__" + time.strftime("%d-%m-%Y_%H-%M-%S")
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
     '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
@@ -176,32 +187,21 @@ np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
-
-def make_env(gym_id, seed, idx):
-    def thunk():
-        env = gym.make(gym_id)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = MicroRTSStatsRecorder(env, args.gamma)
-        env = ImageToPyTorch(env)
-        if args.capture_video:
-            if idx == 0:
-                env = Monitor(env, f'videos/{experiment_name}')
-        env.seed(seed)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
-        return env
-
-    return thunk
-
-
-envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed + i, i) for i in range(args.num_envs)]), device)
-# if args.prod_mode:
-#     envs = VecPyTorch(
-#         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
-#         device
-#     )
+envs = MicroRTSVecEnv(
+    num_envs=args.num_envs,
+    max_steps=20000,
+    render_theme=2,
+    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_envs)],
+    map_path="maps/16x16/basesWorkers16x16.xml",
+    reward_weight=np.array([10.0, 0.1, 0.1, 0.02, 0.1, 0.4])
+)
+envs = MicroRTSStatsRecorder(envs, args.gamma)
+envs = VecMonitor(envs)
+envs = VecPyTorch(envs, device)
+if args.capture_video:
+    envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
+                            record_video_trigger=lambda x: x % 1000000 == 0, video_length=2000)
 assert isinstance(envs.action_space, MultiDiscrete), "only MultiDiscrete action space is supported"
-
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
@@ -236,119 +236,54 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, invalid_action_masks):
+def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn_hidden_states, masks, invalid_action_masks):
+    def _flatten_helper(T, N, _tensor):
+        return _tensor.view(T * N, *_tensor.size()[2:])
 
-    # Supply training samples
-    samples = {
-        'vis_obs': obs.permute(1, 0, 2, 3, 4),
-        'actions': actions.permute(1, 0, 2),
-        'values': values.permute(1, 0),
-        'log_probs': logprobs.permute(1, 0),
-        'advantages': advantages.permute(1, 0),
-        'returns': returns.permute(1, 0),
-        'invalid_action_masks': invalid_action_masks.permute(1, 0, 2),
-        # The loss mask is used for masking the padding while computing the loss function.
-        # This is only of significance while using recurrence.
-        'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32)
-    }
+    assert args.num_envs >= args.n_minibatch, (
+        "PPO requires the number of envs ({}) "
+        "to be greater than or equal to the number of "
+        "PPO mini batches ({}).".format(args.num_envs, args.n_minibatch))
+    num_envs_per_batch = args.num_envs // args.n_minibatch
+    perm = torch.randperm(args.num_envs)
+    for start_ind in range(0, args.num_envs, num_envs_per_batch):
 
-    max_sequence_length = 1
-    # Append the index of the last element of a trajectory as well, as it "artifically" marks the end of an episode
-    for w in range(args.num_envs):
-        if len(episode_done_indices[w]) == 0 or episode_done_indices[w][-1] != args.num_steps - 1:
-            episode_done_indices[w].append(args.num_steps - 1)
+        a_rnn_hidden_states = []
+        a_obs = []
+        a_actions = []
+        a_values = []
+        a_returns = []
+        a_masks = []
+        a_logprobs = []
+        a_advantages = []
+        a_invalid_action_masks = []
 
-    # Split vis_obs, vec_obs, values, advantages, actions and log_probs into episodes and then into sequences
-    for key, value in samples.items():
-        sequences = []
-        for w in range(args.num_envs):
-            start_index = 0
-            for done_index in episode_done_indices[w]:
-                # Split trajectory into episodes
-                episode = value[w, start_index:done_index + 1]
-                start_index = done_index + 1
-                # Split episodes into sequences
-                if args.seq_length > 0:
-                    for start in range(0, len(episode), args.seq_length):
-                        end = start + args.seq_length
-                        sequences.append(episode[start:end])
-                        max_sequence_length = args.seq_length
-                else:
-                    # If the sequence length is not set to a proper value, sequences will be based on episodes
-                    sequences.append(episode)
-                    max_sequence_length = len(episode) if len(
-                        episode) > max_sequence_length else max_sequence_length
+        for offset in range(num_envs_per_batch):
+            ind = perm[start_ind + offset]
+            a_rnn_hidden_states.append(rnn_hidden_states[0:1, ind])
+            a_obs.append(obs[:, ind])
+            a_actions.append(actions[:, ind])
+            a_values.append(values[:, ind])
+            a_returns.append(returns[:, ind])
+            a_masks.append(masks[:, ind])
+            a_logprobs.append(logprobs[:, ind])
+            a_advantages.append(advantages[:, ind])
+            a_invalid_action_masks.append(invalid_action_masks[:, ind])
 
-        # Apply zero-padding to ensure that each episode has the same length
-        # Therfore we can train batches of episodes in parallel instead of one episode at a time
-        for i, sequence in enumerate(sequences):
-            sequences[i] =  pad_sequence(sequence, max_sequence_length)
+        T, N = args.num_steps, num_envs_per_batch
 
-        # Stack episodes (target shape: (Episode, Step, Data ...) & apply data to the samples dict
-        samples[key] = np.stack(sequences, axis=0)
+        b_rnn_hidden_states = torch.stack(a_rnn_hidden_states, 1).view(N, -1)
+        b_obs = _flatten_helper(T, N, torch.stack(a_obs, 1))
+        b_actions = _flatten_helper(T, N, torch.stack(a_actions, 1))
+        b_values = _flatten_helper(T, N, torch.stack(a_values, 1))
+        b_return = _flatten_helper(T, N, torch.stack(a_returns, 1))
+        b_masks = _flatten_helper(T, N, torch.stack(a_masks, 1))
+        b_logprobs = _flatten_helper(T, N, torch.stack(a_logprobs, 1))
+        b_advantages = _flatten_helper(T, N, torch.stack(a_advantages, 1))
+        b_invalid_action_masks = _flatten_helper(T, N, torch.stack(a_invalid_action_masks, 1))
 
-    # Store important information
-    num_sequences = len(samples["values"])
-    actual_sequence_length = max_sequence_length
-
-    # Flatten all samples
-    samples_flat = {}
-    for key, value in samples.items():
-        value = value.reshape(value.shape[0] * value.shape[1], *value.shape[2:])
-        samples_flat[key] = torch.tensor(value, dtype=torch.float32, device=device)
-
-
-    #generator
-    num_sequences_per_batch = num_sequences // args.n_minibatch
-    num_sequences_per_batch = [
-                                  num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
-    remainder = num_sequences % args.n_minibatch
-    for i in range(remainder):
-        num_sequences_per_batch[
-            i] += 1  # Add the remainder if the episode count and the number of mini batches do not share a common divider
-    # Prepare indices, but only shuffle the episode indices and not the entire batch to ensure that sequences of episodes are maintained
-    indices = np.arange(0, num_sequences * args.seq_length).reshape(num_sequences, args.seq_length)
-    sequence_indices = torch.randperm(num_sequences)
-    # At this point it is assumed that all of the available training data (values, observations, actions, ...) is padded.
-
-    # Compose mini batches
-    start = 0
-    for num_sequences in num_sequences_per_batch:
-        end = start + num_sequences
-        mini_batch_indices = indices[sequence_indices[start:end]].reshape(-1)
-        mini_batch = {}
-        for key, value in samples_flat.items():
-            mini_batch[key] = value[mini_batch_indices].to(device)
-        start = end
-        yield mini_batch
-
-def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
-
-def init_recurrent_cell_states(num_sequences):
-        hxs = torch.zeros((num_sequences), args.rnn_hidden_size, dtype=torch.float32, device=device, requires_grad=True).unsqueeze(0).to(device)
-        cxs = torch.zeros((num_sequences), args.rnn_hidden_size, dtype=torch.float32, device=device, requires_grad=True).unsqueeze(0).to(device)
-        return hxs, cxs
-
-def pad_sequence(sequence, target_length):
-    # If a tensor is provided, convert it to a numpy array
-    if isinstance(sequence, torch.Tensor):
-        sequence = sequence.cpu().numpy()
-    # Determine the number of zeros that have to be added to the sequence
-    delta_length = target_length - len(sequence)
-    # If the sequence is already as long as the target length, don't pad
-    if delta_length <= 0:
-        return sequence
-    # Construct array of zeros
-    if len(sequence.shape) > 1:
-        # Case: pad multi-dimensional array like visual observation
-        # padding = np.zeros(((delta_length,) + sequence.shape[1:]), dtype=sequence.dtype)
-        padding = np.full(((delta_length,) + sequence.shape[1:]), sequence[0], dtype=sequence.dtype)
-    else:
-        # padding = np.zeros(delta_length, dtype=sequence.dtype)
-        padding = np.full(delta_length, sequence[0], dtype=sequence.dtype)
-    # Concatenate the zeros to the sequence
-    return np.concatenate((padding, sequence), axis=0)
+        yield b_obs, b_rnn_hidden_states, b_actions, \
+              b_values, b_return, b_masks, b_logprobs, b_advantages, b_invalid_action_masks
 
 
 class Agent(nn.Module):
@@ -359,51 +294,75 @@ class Agent(nn.Module):
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
-            nn.Flatten(),)
-        self.rnn = nn.LSTM(32 * 6 * 6, args.rnn_hidden_size)
-        for name, param in self.rnn.named_parameters():
+            nn.Flatten(),
+            layer_init(nn.Linear(32 * 6 * 6, 256)),
+            nn.ReLU())
+
+        self.gru = nn.GRU(256, args.rnn_hidden_size)
+        for name, param in self.gru.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
-        self.lin_hidden = layer_init(nn.Linear(256, 512))
-        self.lin_value = layer_init(nn.Linear(512, 512))
-        self.lin_policy = layer_init(nn.Linear(512, 512))
-        self.actor = layer_init(nn.Linear(512, envs.action_space.nvec.sum()), std=np.sqrt(0.01))
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
-        self.leaky_relu = nn.LeakyReLU()
+        self.actor = layer_init(nn.Linear(args.rnn_hidden_size, envs.action_space.nvec.sum()), std=0.01)
+        self.critic = layer_init(nn.Linear(args.rnn_hidden_size, 1), std=1)
 
-    def forward(self, x, rnn_state, seq_length=1):
-        x = self.network(x)
-        if seq_length == 1:
-            x, rnn_state = self.rnn(x.unsqueeze(0), rnn_state)
+    def forward(self, x, hxs, mask):
+        x = self.network(x.permute((0, 3, 1, 2)))
+        if x.size(0) == hxs.size(0):
+            x, hxs = self.gru(x.unsqueeze(0), (hxs * mask).unsqueeze(0))
+            x = x.squeeze()
+            hxs = hxs.squeeze(0)
         else:
-            x_shape = x.size()
-            x = x.view(seq_length, (x_shape[0] // seq_length), x_shape[1])
-            x, rnn_state = self.rnn(x, rnn_state)
-            x = x.view(x.shape[0] * x.shape[1], x.shape[2])
-        return x.squeeze(0), rnn_state
+            N = hxs.size(0)
+            T = int(x.size(0) / N)
+            x = x.view(T, N, x.size(1))
+            masks = mask.view(T, N)
+            has_zeros = ((masks[1:] == 0.0) \
+                         .any(dim=-1)
+                         .nonzero()
+                         .squeeze()
+                         .cpu())
 
-    def get_action(self, x, rnn_state, seq_length=1, action=None, invalid_action_masks=None, envs=None):
-        x, rnn_hidden = self.forward(x, rnn_state, seq_length)
+            if has_zeros.dim() == 0:
+                has_zeros = [has_zeros.item() + 1]
+            else:
+                has_zeros = (has_zeros + 1).numpy().tolist()
 
-        x = self.leaky_relu(self.lin_hidden(x))
-        value = self.leaky_relu(self.lin_value(x))
-        policy = self.leaky_relu(self.lin_policy(x))
+            has_zeros = [0] + has_zeros + [T]
+            hxs = hxs.unsqueeze(0)
+            outputs = []
+            for i in range(len(has_zeros) - 1):
+                start_idx = has_zeros[i]
+                end_idx = has_zeros[i + 1]
 
-        logits = self.actor(policy)
+                rnn_scores, hxs = self.gru(
+                    x[start_idx:end_idx],
+                    hxs * masks[start_idx].view(1, -1, 1))
+
+                outputs.append(rnn_scores)
+
+            x = torch.cat(outputs, dim=0)
+            x = x.view(T * N, -1)
+            hxs = hxs.squeeze(0)
+        return x, hxs
+
+    def get_action(self, x, rnn_hidden_state, mask, action=None, invalid_action_masks=None, envs=None):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
+        logits = self.actor(x)
         split_logits = torch.split(logits, envs.action_space.nvec.tolist(), dim=1)
 
         if action is None:
             # 1. select source unit based on source unit mask
-            source_unit_mask = torch.Tensor(np.array(envs.env_method("get_unit_location_mask", player=1)))
+            source_unit_mask = torch.Tensor(np.array(envs.vec_client.getUnitLocationMasks()).reshape(args.num_envs, -1))
             multi_categoricals = [CategoricalMasked(logits=split_logits[0], masks=source_unit_mask)]
             action_components = [multi_categoricals[0].sample()]
             # 2. select action type and parameter section based on the
             #    source-unit mask of action type and parameters
+            # print(np.array(envs.vec_client.getUnitActionMasks(action_components[0].cpu().numpy())).reshape(args.num_envs, -1))
             source_unit_action_mask = torch.Tensor(
-                [envs.env_method("get_unit_action_mask", unit=action_components[0][i].item(), player=1, indices=i)[0]
-                 for i in range(envs.num_envs)])
+                np.array(envs.vec_client.getUnitActionMasks(action_components[0].cpu().numpy())).reshape(args.num_envs,
+                                                                                                         -1))
             split_suam = torch.split(source_unit_action_mask, envs.action_space.nvec.tolist()[1:], dim=1)
             multi_categoricals = multi_categoricals + [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
                                                        zip(split_logits[1:], split_suam)]
@@ -414,16 +373,13 @@ class Agent(nn.Module):
             split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_space.nvec.tolist(), dim=1)
             multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
                                   zip(split_logits, split_invalid_action_masks)]
-            action = action.permute(1,0)
         logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
         entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
-        return self.critic(value), action, logprob.sum(0), entropy.sum(0), invalid_action_masks
+        return rnn_hidden_state, action, logprob.sum(0), entropy.sum(0), invalid_action_masks
 
-    def get_value(self, x, rnn_state):
-        x, rnn_state = self.forward(x, rnn_state)
-        x = self.leaky_relu(self.lin_hidden(x))
-        value = self.leaky_relu(self.lin_value(x))
-        return self.critic(value)
+    def get_value(self, x, rnn_hidden_state, mask):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
+        return self.critic(x)
 
 
 agent = Agent().to(device)
@@ -440,9 +396,9 @@ rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + (envs.action_space.nvec.sum(),)).to(device)
-mask = torch.ones_like(dones)
-rnn_hidden_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
-rnn_cell_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
+rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, args.rnn_hidden_size)).to(device)
+masks = torch.ones((args.num_steps, args.num_envs, 1)).to(device)
+
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 start_time = time.time()
@@ -451,7 +407,8 @@ start_time = time.time()
 next_obs = envs.reset()
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
-
+mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
+rnn_hidden_state = torch.zeros((args.num_envs, args.rnn_hidden_size)).to(device)
 ## CRASH AND RESUME LOGIC:
 starting_update = 1
 if args.prod_mode and wandb.run.resumed:
@@ -474,16 +431,17 @@ for update in range(starting_update, num_updates + 1):
 
     # TRY NOT TO MODIFY: prepare the execution of the game.
     for step in range(0, args.num_steps):
-        envs.env_method("render", indices=0)
+        envs.render()
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
+        rnn_hidden_states[step] = rnn_hidden_state
+        masks[step] = mask
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            values[step] = agent.get_value(obs[step], (rnn_hidden_state, rnn_cell_state)).flatten()
-            ula, action, logproba, _, invalid_action_masks[step] = \
-                agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state), envs=envs)
+            values[step] = agent.get_value(obs[step], rnn_hidden_state, mask).flatten()
+            rnn_hidden_state, action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], rnn_hidden_state, mask, envs=envs)
 
         actions[step] = action.T
         logprobs[step] = logproba
@@ -492,8 +450,6 @@ for update in range(starting_update, num_updates + 1):
         next_obs, rs, ds, infos = envs.step(action.T)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
-        rnn_hidden_state = rnn_hidden_state * mask
-        rnn_cell_state = rnn_cell_state * mask
 
         for info in infos:
             if 'episode' in info.keys():
@@ -505,7 +461,7 @@ for update in range(starting_update, num_updates + 1):
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), rnn_hidden_state, mask).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -531,32 +487,25 @@ for update in range(starting_update, num_updates + 1):
                 returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
             advantages = returns - values
 
-    nonzero = torch.nonzero(dones)
-    dones_index = [[]] * dones.shape[1]
-    for index, value in zip(nonzero[:,1], nonzero[:,0]):
-        tmp = dones_index[index.item()]
-        tmp = tmp[:]
-        tmp.append(value.item())
-        dones_index[index.item()] = tmp
-
     # Optimizaing the policy and value network
     target_agent = Agent().to(device)
+    inds = np.arange(args.batch_size, )
     for i_epoch_pi in range(args.update_epochs):
         target_agent.load_state_dict(agent.state_dict())
-        data_generator = recurrent_generator(dones_index, obs, actions, logprobs, values, advantages, returns, invalid_action_masks)
+        data_generator = recurrent_generator(obs, logprobs, actions, advantages, returns, values,
+                                             rnn_hidden_states, masks, invalid_action_masks)
         for batch in data_generator:
-            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_invalid_action_masks = batch['vis_obs'], batch['actions'], batch[
-                'values'], batch['returns'], batch['log_probs'], batch['advantages'], batch['invalid_action_masks']
+            b_obs, b_rnn_hidden_states, b_actions, b_values, b_returns, b_masks, b_logprobs, b_advantages, b_invalid_action_masks = batch
+
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            new_values, _, newlogproba, entropy, _ = agent.get_action(
+            _, _, newlogproba, entropy, _ = agent.get_action(
                 b_obs,
-                None,
-                seq_length=args.seq_length,
-                action=b_actions,
-                invalid_action_masks=b_invalid_action_masks,
-                envs = envs)
+                b_rnn_hidden_states, b_masks,
+                b_actions.long().T,
+                b_invalid_action_masks,
+                envs)
             ratio = (newlogproba - b_logprobs).exp()
 
             # Stats
@@ -569,7 +518,7 @@ for update in range(starting_update, num_updates + 1):
             entropy_loss = entropy.mean()
 
             # Value loss
-            new_values = new_values.view(-1)
+            new_values = agent.get_value(b_obs, b_rnn_hidden_states, b_masks).view(-1)
             if args.clip_vloss:
                 v_loss_unclipped = ((new_values - b_returns) ** 2)
                 v_clipped = b_values + torch.clamp(new_values - b_values, -args.clip_coef,
@@ -589,6 +538,14 @@ for update in range(starting_update, num_updates + 1):
 
         if args.kle_stop:
             if approx_kl > args.target_kl:
+                break
+        if args.kle_rollback:
+            if (b_logprobs - agent.get_action(
+                    b_obs,
+                    b_actions.long().T,
+                    b_invalid_action_masks,
+                    envs)[1]).mean() > args.target_kl:
+                agent.load_state_dict(target_agent.state_dict())
                 break
 
     ## CRASH AND RESUME LOGIC:
