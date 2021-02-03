@@ -24,9 +24,9 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="workerRushAI-reward-shaping-10.0-0.1-0.1-0.02-0.1-0.4-lr-1.8e-4",
+    parser.add_argument('--gym-id', type=str, default="workerRushAI-reward-shaping-10.0-0.1-0.1-0.02-0.1-0.4",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=1.8e-4,
+    parser.add_argument('--learning-rate', type=float, default=2e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -260,7 +260,7 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
 
         for offset in range(num_envs_per_batch):
             ind = perm[start_ind + offset]
-            a_rnn_hidden_states.append(rnn_hidden_states[0:1, ind])
+            a_rnn_hidden_states.append(torch.stack((rnn_hidden_states[0:1, 0, ind], rnn_hidden_states[0:1, 1, ind])))
             a_obs.append(obs[:, ind])
             a_actions.append(actions[:, ind])
             a_values.append(values[:, ind])
@@ -272,7 +272,7 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
 
         T, N = args.num_steps, num_envs_per_batch
 
-        b_rnn_hidden_states = torch.stack(a_rnn_hidden_states, 1).view(N, -1)
+        b_rnn_hidden_states = torch.stack(a_rnn_hidden_states, 1).view(N, 2, -1)
         b_obs = _flatten_helper(T, N, torch.stack(a_obs, 1))
         b_actions = _flatten_helper(T, N, torch.stack(a_actions, 1))
         b_values = _flatten_helper(T, N, torch.stack(a_values, 1))
@@ -298,8 +298,8 @@ class Agent(nn.Module):
             layer_init(nn.Linear(32 * 6 * 6, 256)),
             nn.ReLU())
 
-        self.gru = nn.GRU(256, args.rnn_hidden_size)
-        for name, param in self.gru.named_parameters():
+        self.lstm = nn.LSTM(256, args.rnn_hidden_size)
+        for name, param in self.lstm.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)
             elif 'weight' in name:
@@ -309,12 +309,13 @@ class Agent(nn.Module):
 
     def forward(self, x, hxs, mask):
         x = self.network(x.permute((0, 3, 1, 2)))
-        if x.size(0) == hxs.size(0):
-            x, hxs = self.gru(x.unsqueeze(0), (hxs * mask).unsqueeze(0))
+        hs = hxs[0]
+        cs = hxs[1]
+        if x.size(0) == hs.size(0):
+            x, (hs, cs) = self.lstm(x.unsqueeze(0), ((hs * mask).unsqueeze(0), (cs * mask).unsqueeze(0)))
             x = x.squeeze()
-            hxs = hxs.squeeze(0)
         else:
-            N = hxs.size(0)
+            N = hs.size(0)
             T = int(x.size(0) / N)
             x = x.view(T, N, x.size(1))
             masks = mask.view(T, N)
@@ -330,21 +331,24 @@ class Agent(nn.Module):
                 has_zeros = (has_zeros + 1).numpy().tolist()
 
             has_zeros = [0] + has_zeros + [T]
-            hxs = hxs.unsqueeze(0)
+            hs = hs.unsqueeze(0)
+            cs = cs.unsqueeze(0)
             outputs = []
             for i in range(len(has_zeros) - 1):
                 start_idx = has_zeros[i]
                 end_idx = has_zeros[i + 1]
 
-                rnn_scores, hxs = self.gru(
+                rnn_scores, (hs, cs) = self.lstm(
                     x[start_idx:end_idx],
-                    hxs * masks[start_idx].view(1, -1, 1))
+                    (hs * masks[start_idx].view(1, -1, 1), cs * masks[start_idx].view(1, -1, 1)))
 
                 outputs.append(rnn_scores)
 
             x = torch.cat(outputs, dim=0)
             x = x.view(T * N, -1)
-            hxs = hxs.squeeze(0)
+        hs = hs.squeeze(0)
+        cs = cs.squeeze(0)
+        hxs = torch.stack([hs, cs])
         return x, hxs
 
     def get_action(self, x, rnn_hidden_state, mask, action=None, invalid_action_masks=None, envs=None):
@@ -396,7 +400,7 @@ rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + (envs.action_space.nvec.sum(),)).to(device)
-rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, args.rnn_hidden_size)).to(device)
+rnn_hidden_states = torch.zeros((args.num_steps, 2, args.num_envs, args.rnn_hidden_size)).to(device)
 masks = torch.ones((args.num_steps, args.num_envs, 1)).to(device)
 
 # TRY NOT TO MODIFY: start the game
@@ -408,7 +412,7 @@ next_obs = envs.reset()
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
 mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
-rnn_hidden_state = torch.zeros((args.num_envs, args.rnn_hidden_size)).to(device)
+rnn_hidden_state = torch.zeros((2, args.num_envs, args.rnn_hidden_size)).to(device)
 ## CRASH AND RESUME LOGIC:
 starting_update = 1
 if args.prod_mode and wandb.run.resumed:
