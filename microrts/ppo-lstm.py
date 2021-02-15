@@ -24,13 +24,13 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="workerRushAI-reward-shaping-10.0-0.1-0.1-0.02-0.1-0.4",
+    parser.add_argument('--gym-id', type=str, default="coacAI-reward-shaping-10.0, 1.0, 1.0, 0.2, 1.0, 4.0-lr-1e-4",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2e-4,
+    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=20000000,
+    parser.add_argument('--total-timesteps', type=int, default=50000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -62,7 +62,7 @@ if __name__ == "__main__":
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.1,
+    parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
                         help="the K epochs to update the policy")
@@ -191,9 +191,9 @@ envs = MicroRTSVecEnv(
     num_envs=args.num_envs,
     max_steps=20000,
     render_theme=2,
-    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_envs)],
+    ai2s=[microrts_ai.coacAI for _ in range(args.num_envs)],
     map_path="maps/16x16/basesWorkers16x16.xml",
-    reward_weight=np.array([10.0, 0.1, 0.1, 0.02, 0.1, 0.4])
+    reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
