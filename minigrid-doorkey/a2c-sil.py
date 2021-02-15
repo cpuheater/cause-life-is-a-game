@@ -7,7 +7,7 @@ from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
-
+from gym_minigrid.wrappers import *
 cv2.ocl.setUseOpenCL(False)
 
 
@@ -54,9 +54,9 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="basic",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=7e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -107,72 +107,56 @@ if __name__ == "__main__":
 
 args.batch_size = int(args.num_envs * args.num_steps)
 
+class InfoWrapper(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        self._rewards = []
 
-class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
-        # assign observation space
-        channel_num = 3
-
-        self.observation_shape = (channel_num, 64, 112)
-        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
-        self.reward_scale = reward_scale
-        game = DoomGame()
-
-        game.load_config(f"./scenarios/{game_config}.cfg")
-        game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.CRCGCB)
-
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
-        self.frame_skip = frame_skip
-
-        game.set_seed(seed)
-        game.set_window_visible(render)
-        game.init()
-
-        self.game = game
-
-    def get_current_input(self):
-        state = self.game.get_state()
-        res_source = []
-        res_source.append(state.screen_buffer)
-        res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
-        self.last_input = res
-        return res
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        vis_obs = self.env.get_obs_render(obs["image"], tile_size=12) / 255.
+        self._rewards = []
+        return vis_obs
 
     def step(self, action):
-        info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
-        done = self.game.is_episode_finished()
+        obs, reward, done, info = self.env.step(action)
+        self._rewards.append(reward)
+        ## Retrieve the RGB frame of the agent's vision
+        vis_obs = self.env.get_obs_render(obs["image"], tile_size=12) / 255.
+
+        ## Render the environment in realtime
+        #if self._realtime_mode:
+        #    self._env.render(tile_size=96)
+        #    time.sleep(0.5)
+
+        # Wrap up episode information once completed (i.e. done)
         if done:
-            ob = self.last_input
-        else:
-            ob = self.get_current_input()
-        # reward scaling
-        reward = reward * self.reward_scale
-        self.total_reward += reward
-        self.total_length += 1
+            info = {"reward": sum(self._rewards),
+                    "length": len(self._rewards)}
 
-        if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
+        return vis_obs, reward, done, info
 
-        return ob, reward, done, info
+class WarpFrame(gym.ObservationWrapper):
+    def __init__(self, env, width=84, height=84):
+        super().__init__(env)
+        self._width = width
+        self._height = height
+        num_colors = 3
+        new_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(self._height, self._width, num_colors),
+            dtype=np.uint8,
+        )
+        self.observation_space = new_space
+        original_space = self.observation_space
+        self.observation_space = new_space
+        assert original_space.dtype == np.uint8 and len(original_space.shape) == 3
 
-    def reset(self):
-        self.game.new_episode()
-        self.total_reward = 0
-        self.total_length = 0
-        ob = self.get_current_input()
-        return ob
-
-    def close(self):
-        self.game.close()
+    def observation(self, obs):
+        frame = obs
+        frame = cv2.resize(frame, (self._width, self._height), interpolation=cv2.INTER_AREA)
+        return frame
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -194,6 +178,7 @@ class VecPyTorch(VecEnvWrapper):
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
 
+
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
@@ -212,7 +197,11 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
-        env = ViZDoomEnv(seed, args.gym_id, render=True, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
+        env = gym.make(args.gym_id)
+        env = InfoWrapper(env)
+        env = WarpFrame(env)
+        env = wrap_pytorch(env)
+        env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
@@ -244,7 +233,7 @@ class Agent(nn.Module):
     def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            Scale(1/255),
+            #Scale(1/255),
             layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
@@ -252,7 +241,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(3136, 512)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
@@ -319,10 +308,10 @@ for update in range(1, num_updates+1):
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
         for info in infos:
-            if 'Episode_Total_Reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
-            if 'Episode_Total_Len' in info.keys():
-                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
+            if info and 'reward' in info.keys():
+                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
+            if info and 'length' in info.keys():
+                writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():

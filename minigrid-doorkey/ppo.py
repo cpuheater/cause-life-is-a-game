@@ -250,7 +250,7 @@ class Agent(nn.Module):
     def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            Scale(1/255),
+            #Scale(1/255),
             layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
