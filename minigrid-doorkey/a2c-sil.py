@@ -48,6 +48,8 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+from sil_module import sil_module
+import copy
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='A2C agent')
@@ -100,6 +102,16 @@ if __name__ == "__main__":
                           help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help="Toggle learning rate annealing for policy and value networks")
+
+    # SIL
+    parser.add_argument('--num-update', type=int, default=4, help='')
+    parser.add_argument('--capacity', type=int, default=100000, help='')
+    parser.add_argument('--sil-beta', type=float, default=0.1, help='')
+    parser.add_argument('--sil-alpha', type=float, default=0.6, help='')
+    parser.add_argument('--max-nlogp', type=int, default=5, help='')
+    parser.add_argument('--mini-batch-size', type=int, default=64, help='')
+    parser.add_argument('--clip', type=int, default=1, help='')
+    parser.add_argument('--w_value', type=float, default=0.01, help='')
 
     args = parser.parse_args()
     #if not args.seed:
@@ -264,7 +276,7 @@ class Agent(nn.Module):
 
 agent = Agent(envs).to(device)
 optimizer = optim.RMSprop(agent.parameters(), lr=args.learning_rate)
-
+sil = sil_module(agent, args, optimizer)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
@@ -306,7 +318,7 @@ for update in range(1, num_updates+1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-
+        sil.step(obs[step].cpu().numpy(), action.cpu().numpy(),copy.deepcopy(rs.cpu().reshape(-1).numpy()), ds)
         for info in infos:
             if info and 'reward' in info.keys():
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
@@ -357,6 +369,7 @@ for update in range(1, num_updates+1):
     nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
     optimizer.step()
 
+    sil.train_sil_model()
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
