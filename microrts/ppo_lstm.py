@@ -24,7 +24,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="coacAI-reward-shaping-10.0, 1.0, 1.0, 0.2, 1.0, 4.0-lr-1e-4",
+    parser.add_argument('--gym-id', type=str, default="1010MicrortsDefeatRandomEnemyShapedReward-v3",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -191,8 +191,8 @@ envs = MicroRTSVecEnv(
     num_envs=args.num_envs,
     max_steps=20000,
     render_theme=2,
-    ai2s=[microrts_ai.coacAI for _ in range(args.num_envs)],
-    map_path="maps/16x16/basesWorkers16x16.xml",
+    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_envs)],
+    map_path="maps/10x10/basesWorkers10x10.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
@@ -290,15 +290,15 @@ class Agent(nn.Module):
     def __init__(self, frames=4):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+            layer_init(nn.Conv2d(27, 10, kernel_size=3, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            layer_init(nn.Conv2d(10, 20, kernel_size=2)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(32 * 6 * 6, 256)),
+            layer_init(nn.Linear(180, 180)),
             nn.ReLU())
 
-        self.lstm = nn.LSTM(256, args.rnn_hidden_size)
+        self.lstm = nn.LSTM(180, args.rnn_hidden_size)
         for name, param in self.lstm.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)

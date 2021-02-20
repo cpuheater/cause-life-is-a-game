@@ -51,6 +51,8 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import copy
+from sil_module import sil_module
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -117,6 +119,16 @@ if __name__ == "__main__":
                           help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+
+    # SIL
+    parser.add_argument('--num-update', type=int, default=10, help='')
+    parser.add_argument('--capacity', type=int, default=50000, help='')
+    parser.add_argument('--sil-beta', type=float, default=0.1, help='')
+    parser.add_argument('--sil-alpha', type=float, default=0.6, help='')
+    parser.add_argument('--max-nlogp', type=int, default=5, help='')
+    parser.add_argument('--mini-batch-size', type=int, default=64, help='')
+    parser.add_argument('--clip', type=int, default=1, help='')
+    parser.add_argument('--w_value', type=float, default=0.01, help='')
 
     args = parser.parse_args()
     #if not args.seed:
@@ -281,6 +293,7 @@ class Agent(nn.Module):
 
 agent = Agent(envs).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+sil = sil_module(agent, args, optimizer)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
@@ -324,7 +337,7 @@ for update in range(1, num_updates+1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-
+        sil.step(obs[step].cpu().numpy(), action.cpu().numpy(), copy.deepcopy(rs.cpu().reshape(-1).numpy()), ds)
         for info in infos:
             if info and 'reward' in info.keys():
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
@@ -417,6 +430,8 @@ for update in range(1, num_updates+1):
             if (b_logprobs[minibatch_ind] - agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])[1]).mean() > args.target_kl:
                 agent.load_state_dict(target_agent.state_dict())
                 break
+
+    sil.train_sil_model()
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
