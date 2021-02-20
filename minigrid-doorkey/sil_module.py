@@ -156,7 +156,7 @@ class sil_module:
                 # start to get the action loss...
                 action_loss = torch.sum(clipped_advantages * weights * clipped_nlogp) / num_samples
                 entropy_reg = torch.sum(weights * dist_entropy * masks) / num_samples
-                policy_loss = action_loss - entropy_reg * self.args.ent_coef
+                policy_loss = action_loss - entropy_reg * self.args.sil_entropy_coef
                 # start to process the value loss..
                 # get the value loss
                 delta = torch.clamp(value - returns, -self.args.clip, 0) * masks

@@ -126,9 +126,11 @@ if __name__ == "__main__":
     parser.add_argument('--sil-beta', type=float, default=0.1, help='')
     parser.add_argument('--sil-alpha', type=float, default=0.6, help='')
     parser.add_argument('--max-nlogp', type=int, default=5, help='')
-    parser.add_argument('--mini-batch-size', type=int, default=64, help='')
-    parser.add_argument('--clip', type=int, default=1, help='')
-    parser.add_argument('--w_value', type=float, default=0.01, help='')
+    parser.add_argument('--mini-batch-size', type=int, default=512, help='')
+    parser.add_argument('--clip', type=int, default=100, help='')
+    parser.add_argument('--w-value', type=float, default=0.05, help='')
+    parser.add_argument('--sil-entropy-coef', type=float, default=0.01, help='')
+
 
     args = parser.parse_args()
     #if not args.seed:
