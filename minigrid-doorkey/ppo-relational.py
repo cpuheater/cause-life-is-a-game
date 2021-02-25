@@ -51,6 +51,7 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+from einops import rearrange
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -132,13 +133,13 @@ class InfoWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
+        vis_obs = obs["image"]
         self._rewards = []
-        return obs["image"]
+        return vis_obs
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self._rewards.append(reward)
-        ## Retrieve the RGB frame of the agent's vision
         vis_obs = obs["image"]
 
         ## Render the environment in realtime
@@ -154,7 +155,7 @@ class InfoWrapper(gym.Wrapper):
         return vis_obs, reward, done, info
 
 class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84):
+    def __init__(self, env):
         super().__init__(env)
         self.observation_space = env.observation_space.spaces['image']
 
@@ -234,21 +235,71 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
+        self.num_heads = 3
+        self.node_size = 64
+        self.conv2_out_channels = 20
+        self.sp_coord_dim = 2
+        self.N = int(7 ** 2)
         self.network = nn.Sequential(
-            # Scale(1/255),
             layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            layer_init(nn.Conv2d(16, self.conv2_out_channels, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(980, 124)),
-            nn.ReLU()
         )
-        self.actor = layer_init(nn.Linear(124, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(124, 1), std=1)
+        self.proj_shape = (self.conv2_out_channels + self.sp_coord_dim, self.num_heads * self.node_size)
+        self.k_proj = nn.Linear(*self.proj_shape)
+        self.q_proj = nn.Linear(*self.proj_shape)
+        self.v_proj = nn.Linear(*self.proj_shape)
+
+        self.k_lin = nn.Linear(self.node_size, self.N)
+        self.q_lin = nn.Linear(self.node_size, self.N)
+        self.a_lin = nn.Linear(self.N, self.N)
+
+        self.node_shape = (self.num_heads, self.N, self.node_size)
+        self.k_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+        self.q_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+        self.v_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+
+        self.linear1 = nn.Linear(self.num_heads * self.node_size, self.node_size)
+        self.norm1 = nn.LayerNorm([self.N, self.node_size], elementwise_affine=False)
+        self.linear2 = nn.Linear(self.node_size, self.node_size)
+        self.actor = layer_init(nn.Linear(self.node_size, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(self.node_size, 1), std=1)
 
     def forward(self, x):
-        return self.network(x)
+        N, C, H, W = x.shape
+        x = self.network(x)
+        _, _, cH, cW = x.shape
+        xcoords = torch.arange(cW).repeat(cH, 1).float().to(device) / cW  # G
+        ycoords = torch.arange(cH).repeat(cW, 1).transpose(1, 0).float().to(device) / cH
+        spatial_coords = torch.stack([xcoords, ycoords], dim=0)
+        spatial_coords = spatial_coords.unsqueeze(dim=0)
+        spatial_coords = spatial_coords.repeat(N, 1, 1, 1)
+        x = torch.cat([x, spatial_coords], dim=1)
+        x = x.permute(0, 2, 3, 1)
+        x = x.flatten(1, 2)
+        K = rearrange(self.k_proj(x), "b n (head d) -> b head n d", head=self.num_heads)
+        K = self.k_norm(K)
+
+        Q = rearrange(self.q_proj(x), "b n (head d) -> b head n d", head=self.num_heads)
+        Q = self.q_norm(Q)
+
+        V = rearrange(self.v_proj(x), "b n (head d) -> b head n d", head=self.num_heads)
+        V = self.v_norm(V)
+        A = torch.nn.functional.elu(self.q_lin(Q) + self.k_lin(K))  # D
+        A = self.a_lin(A)
+        A = torch.nn.functional.softmax(A, dim=3)
+        with torch.no_grad():
+            self.att_map = A.clone()  # E
+        E = torch.einsum('bhfc,bhcd->bhfd', A, V)  # F
+        E = rearrange(E, 'b head n d -> b n (head d)')
+        E = self.linear1(E)
+        E = torch.relu(E)
+        E = self.norm1(E)
+        E = E.max(dim=1)[0]
+        y = self.linear2(E)
+        y = torch.nn.functional.elu(y)
+        return y
 
     def get_action(self, x, action=None):
         x = self.forward(x)

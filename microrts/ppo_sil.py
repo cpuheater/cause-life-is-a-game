@@ -19,13 +19,15 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+from sil_module import sil_module
+import copy
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="1010MicrortsDefeatRandomEnemyShapedReward-v3",
+    parser.add_argument('--gym-id', type=str, default="1010MicrortsDefeatRandomEnemyShapedReward-v3-SIL",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -81,6 +83,19 @@ if __name__ == "__main__":
                         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+
+    # SIL
+    parser.add_argument('--num-update', type=int, default=10, help='')
+    parser.add_argument('--capacity', type=int, default=50000, help='')
+    parser.add_argument('--sil-beta', type=float, default=0.1, help='')
+    parser.add_argument('--sil-alpha', type=float, default=0.6, help='')
+    parser.add_argument('--max-nlogp', type=int, default=5, help='')
+    parser.add_argument('--mini-batch-size', type=int, default=512, help='')
+    parser.add_argument('--clip', type=int, default=100, help='')
+    parser.add_argument('--w-value', type=float, default=0.05, help='')
+    parser.add_argument('--sil-entropy-coef', type=float, default=0.01, help='')
+
+
 
     args = parser.parse_args()
     if not args.seed:
@@ -200,6 +215,7 @@ envs = MicroRTSVecEnv(
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
 envs = VecPyTorch(envs, device)
+
 if args.capture_video:
     envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x: x % 1000000 == 0, video_length=2000)
@@ -292,6 +308,7 @@ class Agent(nn.Module):
 
 agent = Agent().to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+sil = sil_module(agent, args, optimizer, envs)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
@@ -350,7 +367,7 @@ for update in range(starting_update, num_updates + 1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action.T)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-
+        sil.step(obs[step].cpu().numpy(), action.T.cpu().numpy(), copy.deepcopy(rs.cpu().reshape(-1).numpy()), ds, invalid_action_masks[step].cpu().numpy())
         for info in infos:
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
@@ -462,6 +479,8 @@ for update in range(starting_update, num_updates + 1):
             os.makedirs(f"models/{experiment_name}")
         torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
         wandb.save(f"agent.pt")
+
+    sil.train_sil_model()
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
