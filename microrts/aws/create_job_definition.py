@@ -4,10 +4,10 @@ import re
 client = boto3.client('batch')
 
 response = client.register_job_definition(
-    jobDefinitionName='gym-microrts',
+    jobDefinitionName='cpuheater-gym-microrts',
     type='container',
     containerProperties={
-        'image': 'vwxyzjn/gym-microrts:latest',
+        'image': 'cpuheater/gym-microrts:latest',
         'vcpus': 1,
         'memory': 2000,
     },

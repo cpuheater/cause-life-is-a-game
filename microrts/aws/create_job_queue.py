@@ -5,13 +5,13 @@ client = boto3.client('batch')
 
 print("creating job queue")
 response = client.create_job_queue(
-     jobQueueName='gym-microrts',
+     jobQueueName='gym-microrts-cpu',
      state='ENABLED',
      priority=100,
      computeEnvironmentOrder=[
          {
              'order': 100,
-             'computeEnvironment': 'rl-gpu'
+             'computeEnvironment': 'rl-cpu'
          }
      ]
  )

@@ -11,13 +11,13 @@ client = boto3.client('batch')
 
 parser = argparse.ArgumentParser(description='CleanRL Experiment Submission')
 # Common arguments
-parser.add_argument('--exp-script', type=str, default="scripts/td3_pybullet.sh",
+parser.add_argument('--exp-script', type=str, default="run_exp.sh",
                    help='the name of this experiment')
 parser.add_argument('--job-queue', type=str, default="cleanrl",
                    help='the name of the job queue')
 parser.add_argument('--wandb-key', type=str, default="",
                    help='the wandb key. If not provided, the script will try to read the env variable `WANDB_KEY`')
-parser.add_argument('--docker-repo', type=str, default="vwxyzjn/gym-microrts:latest",
+parser.add_argument('--docker-repo', type=str, default="cpuheater/gym-microrts:latest",
                    help='the name of the job queue')
 parser.add_argument('--job-definition', type=str, default="cleanrl",
                    help='the name of the job definition')
@@ -46,7 +46,7 @@ assert len(args.wandb_key) > 0, "set the environment variable `WANDB_KEY` to you
 final_run_cmds = []
 with open(args.exp_script) as f:
     strings = f.read()
-runs_match = re.findall('(python)(.+)((?:\n.+)+)(seed)',strings)
+    runs_match = re.findall('(python)(.+)((?:\n.+)+)(seed)',strings)
 for run_match in runs_match:
     run_match_str = "".join(run_match).replace("\\\n", "")
     # print(run_match_str)
