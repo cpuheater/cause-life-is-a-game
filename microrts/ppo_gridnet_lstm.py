@@ -26,7 +26,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
+    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI-gridnet-lstm",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -84,6 +84,8 @@ if __name__ == "__main__":
                         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+    parser.add_argument('--rnn-hidden-size', type=int, default=256,
+                        help='rnn hidden size')
 
     args = parser.parse_args()
     if not args.seed:
@@ -229,6 +231,54 @@ class Transpose(nn.Module):
     def forward(self, x):
         return x.permute(self.permutation)
 
+def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn_hidden_states, masks, invalid_action_masks):
+    def _flatten_helper(T, N, _tensor):
+        return _tensor.view(T * N, *_tensor.size()[2:])
+
+    assert args.num_envs >= args.n_minibatch, (
+        "PPO requires the number of envs ({}) "
+        "to be greater than or equal to the number of "
+        "PPO mini batches ({}).".format(args.num_envs, args.n_minibatch))
+    num_envs_per_batch = args.num_envs // args.n_minibatch
+    perm = torch.randperm(args.num_envs)
+    for start_ind in range(0, args.num_envs, num_envs_per_batch):
+
+        a_rnn_hidden_states = []
+        a_obs = []
+        a_actions = []
+        a_values = []
+        a_returns = []
+        a_masks = []
+        a_logprobs = []
+        a_advantages = []
+        a_invalid_action_masks = []
+
+        for offset in range(num_envs_per_batch):
+            ind = perm[start_ind + offset]
+            a_rnn_hidden_states.append(torch.stack((rnn_hidden_states[0:1, 0, ind], rnn_hidden_states[0:1, 1, ind])))
+            a_obs.append(obs[:, ind])
+            a_actions.append(actions[:, ind])
+            a_values.append(values[:, ind])
+            a_returns.append(returns[:, ind])
+            a_masks.append(masks[:, ind])
+            a_logprobs.append(logprobs[:, ind])
+            a_advantages.append(advantages[:, ind])
+            a_invalid_action_masks.append(invalid_action_masks[:, ind])
+
+        T, N = args.num_steps, num_envs_per_batch
+
+        b_rnn_hidden_states = torch.stack(a_rnn_hidden_states, 1).view(N, 2, -1)
+        b_obs = _flatten_helper(T, N, torch.stack(a_obs, 1))
+        b_actions = _flatten_helper(T, N, torch.stack(a_actions, 1))
+        b_values = _flatten_helper(T, N, torch.stack(a_values, 1))
+        b_return = _flatten_helper(T, N, torch.stack(a_returns, 1))
+        b_masks = _flatten_helper(T, N, torch.stack(a_masks, 1))
+        b_logprobs = _flatten_helper(T, N, torch.stack(a_logprobs, 1))
+        b_advantages = _flatten_helper(T, N, torch.stack(a_advantages, 1))
+        b_invalid_action_masks = _flatten_helper(T, N, torch.stack(a_invalid_action_masks, 1))
+
+        yield b_obs, b_rnn_hidden_states, b_actions, \
+              b_values, b_return, b_masks, b_logprobs, b_advantages, b_invalid_action_masks
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -247,15 +297,63 @@ class Agent(nn.Module):
             nn.ReLU(),
             nn.Flatten(),
             layer_init(nn.Linear(288, 256)),
-            nn.ReLU(), )
-        self.actor = layer_init(nn.Linear(256, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+            nn.ReLU())
+        self.lstm = nn.LSTM(256, args.rnn_hidden_size)
+        for name, param in self.lstm.named_parameters():
+            if 'bias' in name:
+                nn.init.constant_(param, 0)
+            elif 'weight' in name:
+                nn.init.orthogonal_(param, np.sqrt(2))
+        self.actor = layer_init(nn.Linear(args.rnn_hidden_size, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
+        self.critic = layer_init(nn.Linear(args.rnn_hidden_size, 1), std=1)
 
-    def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+    def forward(self, x, hxs, mask):
+        x = self.network(x.permute((0, 3, 1, 2)))
+        hs = hxs[0]
+        cs = hxs[1]
+        if x.size(0) == hs.size(0):
+            x, (hs, cs) = self.lstm(x.unsqueeze(0), ((hs * mask).unsqueeze(0), (cs * mask).unsqueeze(0)))
+            x = x.squeeze()
+        else:
+            N = hs.size(0)
+            T = int(x.size(0) / N)
+            x = x.view(T, N, x.size(1))
+            masks = mask.view(T, N)
+            has_zeros = ((masks[1:] == 0.0) \
+                         .any(dim=-1)
+                         .nonzero()
+                         .squeeze()
+                         .cpu())
 
-    def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
-        logits = self.actor(self.forward(x))
+            if has_zeros.dim() == 0:
+                has_zeros = [has_zeros.item() + 1]
+            else:
+                has_zeros = (has_zeros + 1).numpy().tolist()
+
+            has_zeros = [0] + has_zeros + [T]
+            hs = hs.unsqueeze(0)
+            cs = cs.unsqueeze(0)
+            outputs = []
+            for i in range(len(has_zeros) - 1):
+                start_idx = has_zeros[i]
+                end_idx = has_zeros[i + 1]
+
+                rnn_scores, (hs, cs) = self.lstm(
+                    x[start_idx:end_idx],
+                    (hs * masks[start_idx].view(1, -1, 1), cs * masks[start_idx].view(1, -1, 1)))
+
+                outputs.append(rnn_scores)
+
+            x = torch.cat(outputs, dim=0)
+            x = x.view(T * N, -1)
+        hs = hs.squeeze(0)
+        cs = cs.squeeze(0)
+        hxs = torch.stack([hs, cs])
+        return x, hxs
+
+    def get_action(self, x, rnn_hidden_state, mask, action=None, invalid_action_masks=None, envs=None):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
+        logits = self.actor(x)
         grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
         split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
 
@@ -269,7 +367,7 @@ class Agent(nn.Module):
             action = torch.stack([categorical.sample() for categorical in multi_categoricals])
         else:
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            action = action.view(-1, action.shape[-1]).T
+            action = action.reshape(action.shape[0],-1)
             split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
                                                      dim=1)
             multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
@@ -281,10 +379,11 @@ class Agent(nn.Module):
         entropy = entropy.T.view(-1, 100, num_predicted_parameters)
         action = action.T.view(-1, 100, num_predicted_parameters)
         invalid_action_masks = invalid_action_masks.view(-1, 100, envs.action_space.nvec[1:].sum() + 1)
-        return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
+        return rnn_hidden_state, action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
 
-    def get_value(self, x):
-        return self.critic(self.forward(x))
+    def get_value(self, x, rnn_hidden_state, mask):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
+        return self.critic(x)
 
 
 agent = Agent().to(device)
@@ -305,6 +404,9 @@ rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + invalid_action_shape).to(device)
+rnn_hidden_states = torch.zeros((args.num_steps, 2, args.num_envs, args.rnn_hidden_size)).to(device)
+masks = torch.ones((args.num_steps, args.num_envs, 1)).to(device)
+
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 start_time = time.time()
@@ -313,6 +415,8 @@ start_time = time.time()
 next_obs = torch.Tensor(envs.reset()).to(device)
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
+mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
+rnn_hidden_state = torch.zeros((2, args.num_envs, args.rnn_hidden_size)).to(device)
 
 ## CRASH AND RESUME LOGIC:
 starting_update = 1
@@ -343,10 +447,13 @@ for update in range(starting_update, num_updates + 1):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
+        rnn_hidden_states[step] = rnn_hidden_state
+        masks[step] = mask
+
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            values[step] = agent.get_value(obs[step]).flatten()
-            action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], envs=envs)
+            values[step] = agent.get_value(obs[step], rnn_hidden_state, mask).flatten()
+            rnn_hidden_state, action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], rnn_hidden_state, mask, envs=envs)
 
         actions[step] = action
         logprobs[step] = logproba
@@ -382,6 +489,7 @@ for update in range(starting_update, num_updates + 1):
             e.printStackTrace()
             raise
         rewards[step], next_done = torch.Tensor(rs).to(device), torch.Tensor(ds).to(device)
+        mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
 
         for info in infos:
             if 'episode' in info.keys():
@@ -393,7 +501,7 @@ for update in range(starting_update, num_updates + 1):
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), rnn_hidden_state, mask).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -419,53 +527,43 @@ for update in range(starting_update, num_updates + 1):
                 returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
             advantages = returns - values
 
-    # flatten the batch
-    b_obs = obs.reshape((-1,) + envs.observation_space.shape)
-    b_logprobs = logprobs.reshape(-1)
-    b_actions = actions.reshape((-1,) + action_space_shape)
-    b_advantages = advantages.reshape(-1)
-    b_returns = returns.reshape(-1)
-    b_values = values.reshape(-1)
-    b_invalid_action_masks = invalid_action_masks.reshape((-1,) + invalid_action_shape)
-
     # Optimizaing the policy and value network
-    inds = np.arange(args.batch_size, )
     for i_epoch_pi in range(args.update_epochs):
-        np.random.shuffle(inds)
-        for start in range(0, args.batch_size, args.minibatch_size):
-            end = start + args.minibatch_size
-            minibatch_ind = inds[start:end]
-            mb_advantages = b_advantages[minibatch_ind]
+        data_generator = recurrent_generator(obs, logprobs, actions, advantages, returns, values,
+                                             rnn_hidden_states, masks, invalid_action_masks)
+        for batch in data_generator:
+            b_obs, b_rnn_hidden_states, b_actions, b_values, b_returns, b_masks, b_logprobs, b_advantages, b_invalid_action_masks = batch
+
             if args.norm_adv:
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-            # raise
-            _, newlogproba, entropy, _ = agent.get_action(
-                b_obs[minibatch_ind],
-                b_actions.long()[minibatch_ind],
-                b_invalid_action_masks[minibatch_ind],
+                mb_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
+            _, _, newlogproba, entropy, _ = agent.get_action(
+                b_obs,
+                b_rnn_hidden_states, b_masks,
+                b_actions.long().T,
+                b_invalid_action_masks,
                 envs)
-            ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
+            ratio = (newlogproba - b_logprobs).exp()
 
             # Stats
-            approx_kl = (b_logprobs[minibatch_ind] - newlogproba).mean()
+            approx_kl = (b_logprobs - newlogproba).mean()
 
             # Policy loss
-            pg_loss1 = -mb_advantages * ratio
-            pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+            pg_loss1 = -b_advantages * ratio
+            pg_loss2 = -b_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
             pg_loss = torch.max(pg_loss1, pg_loss2).mean()
             entropy_loss = entropy.mean()
 
             # Value loss
-            new_values = agent.get_value(b_obs[minibatch_ind]).view(-1)
+            new_values = agent.get_value(b_obs, b_rnn_hidden_states, b_masks).view(-1)
             if args.clip_vloss:
-                v_loss_unclipped = ((new_values - b_returns[minibatch_ind]) ** 2)
-                v_clipped = b_values[minibatch_ind] + torch.clamp(new_values - b_values[minibatch_ind], -args.clip_coef,
+                v_loss_unclipped = ((new_values - b_returns) ** 2)
+                v_clipped = b_values + torch.clamp(new_values - b_values, -args.clip_coef,
                                                                   args.clip_coef)
-                v_loss_clipped = (v_clipped - b_returns[minibatch_ind]) ** 2
+                v_loss_clipped = (v_clipped - b_returns) ** 2
                 v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                 v_loss = 0.5 * v_loss_max.mean()
             else:
-                v_loss = 0.5 * ((new_values - b_returns[minibatch_ind]) ** 2)
+                v_loss = 0.5 * ((new_values - b_returns) ** 2)
 
             loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 

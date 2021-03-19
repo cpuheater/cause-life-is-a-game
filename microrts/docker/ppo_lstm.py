@@ -62,7 +62,7 @@ if __name__ == "__main__":
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.2,
+    parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
                         help="the K epochs to update the policy")
@@ -260,7 +260,7 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
 
         for offset in range(num_envs_per_batch):
             ind = perm[start_ind + offset]
-            a_rnn_hidden_states.append(torch.stack((rnn_hidden_states[0:1, 0, ind], rnn_hidden_states[0:1, 1, ind])))
+            a_rnn_hidden_states.append(rnn_hidden_states[0:1, :, ind])
             a_obs.append(obs[:, ind])
             a_actions.append(actions[:, ind])
             a_values.append(values[:, ind])
@@ -272,7 +272,8 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
 
         T, N = args.num_steps, num_envs_per_batch
 
-        b_rnn_hidden_states = torch.stack(a_rnn_hidden_states, 1).view(N, 2, -1)
+        #recurrent_hidden_states_batch = torch.cat(recurrent_hidden_states_batch, 0).transpose(0, 1)
+        b_rnn_hidden_states = torch.cat(a_rnn_hidden_states, 0).transpose(0, 1)
         b_obs = _flatten_helper(T, N, torch.stack(a_obs, 1))
         b_actions = _flatten_helper(T, N, torch.stack(a_actions, 1))
         b_values = _flatten_helper(T, N, torch.stack(a_values, 1))
@@ -337,7 +338,6 @@ class Agent(nn.Module):
             for i in range(len(has_zeros) - 1):
                 start_idx = has_zeros[i]
                 end_idx = has_zeros[i + 1]
-
                 rnn_scores, (hs, cs) = self.lstm(
                     x[start_idx:end_idx],
                     (hs * masks[start_idx].view(1, -1, 1), cs * masks[start_idx].view(1, -1, 1)))

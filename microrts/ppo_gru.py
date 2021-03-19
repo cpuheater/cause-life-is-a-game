@@ -193,7 +193,7 @@ envs = MicroRTSVecEnv(
     render_theme=2,
     ai2s=[microrts_ai.workerRushAI for _ in range(args.num_envs)],
     map_path="maps/16x16/basesWorkers16x16.xml",
-    reward_weight=np.array([10.0, 0.1, 0.1, 0.02, 0.1, 0.4])
+    reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
