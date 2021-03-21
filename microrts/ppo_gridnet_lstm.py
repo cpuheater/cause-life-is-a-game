@@ -66,7 +66,7 @@ if __name__ == "__main__":
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.1,
+    parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
                         help="the K epochs to update the policy")
@@ -242,7 +242,6 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
     num_envs_per_batch = args.num_envs // args.n_minibatch
     perm = torch.randperm(args.num_envs)
     for start_ind in range(0, args.num_envs, num_envs_per_batch):
-
         a_rnn_hidden_states = []
         a_obs = []
         a_actions = []
@@ -255,7 +254,7 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
 
         for offset in range(num_envs_per_batch):
             ind = perm[start_ind + offset]
-            a_rnn_hidden_states.append(torch.stack((rnn_hidden_states[0:1, 0, ind], rnn_hidden_states[0:1, 1, ind])))
+            a_rnn_hidden_states.append(rnn_hidden_states[0:1, :, ind])
             a_obs.append(obs[:, ind])
             a_actions.append(actions[:, ind])
             a_values.append(values[:, ind])
@@ -267,7 +266,7 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
 
         T, N = args.num_steps, num_envs_per_batch
 
-        b_rnn_hidden_states = torch.stack(a_rnn_hidden_states, 1).view(N, 2, -1)
+        b_rnn_hidden_states = torch.cat(a_rnn_hidden_states, 0).transpose(0, 1)
         b_obs = _flatten_helper(T, N, torch.stack(a_obs, 1))
         b_actions = _flatten_helper(T, N, torch.stack(a_actions, 1))
         b_values = _flatten_helper(T, N, torch.stack(a_values, 1))
@@ -367,7 +366,7 @@ class Agent(nn.Module):
             action = torch.stack([categorical.sample() for categorical in multi_categoricals])
         else:
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            action = action.reshape(action.shape[0],-1)
+            action = action.view(-1, action.shape[-1]).T
             split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
                                                      dim=1)
             multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
@@ -539,7 +538,7 @@ for update in range(starting_update, num_updates + 1):
             _, _, newlogproba, entropy, _ = agent.get_action(
                 b_obs,
                 b_rnn_hidden_states, b_masks,
-                b_actions.long().T,
+                b_actions.long(),
                 b_invalid_action_masks,
                 envs)
             ratio = (newlogproba - b_logprobs).exp()
