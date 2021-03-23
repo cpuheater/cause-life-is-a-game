@@ -316,7 +316,6 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
                 a_logprobs.append(logprobs[:, ind])
                 a_advantages.append(advantages[:, ind])
 
-
             T, N = args.num_steps, num_envs_per_batch
 
             b_rnn_hidden_states = torch.stack(a_rnn_hidden_states, 1).view(N, -1)
