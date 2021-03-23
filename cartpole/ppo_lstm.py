@@ -55,7 +55,7 @@ if __name__ == "__main__":
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=100000,
+    parser.add_argument('--total-timesteps', type=int, default=1000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -236,9 +236,9 @@ class Agent(nn.Module):
     def __init__(self, envs):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.observation_space.shape).prod(), 256)),
+            layer_init(nn.Linear(np.array(envs.observation_space.shape).prod(), 128)),
             nn.ReLU(),
-            layer_init(nn.Linear(256, args.rnn_hidden_size)),
+            layer_init(nn.Linear(128, args.rnn_hidden_size)),
             nn.ReLU()
         )
 
