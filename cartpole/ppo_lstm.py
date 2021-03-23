@@ -75,7 +75,7 @@ if __name__ == "__main__":
                         help='the number of mini batch')
     parser.add_argument('--num-envs', type=int, default=4,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=128,
+    parser.add_argument('--num-steps', type=int, default=16,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
