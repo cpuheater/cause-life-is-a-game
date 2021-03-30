@@ -238,28 +238,74 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class Transpose(nn.Module):
+    def __init__(self, permutation):
+        super().__init__()
+        self.permutation = permutation
+
+    def forward(self, x):
+        return x.permute(self.permutation)
+
+class Encoder(nn.Module):
+    def __init__(self, input_channels):
+        super().__init__()
+        self._encoder = nn.Sequential(
+            Transpose((0, 3, 1, 2)),
+            layer_init(nn.Conv2d(input_channels, 32, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(128, 100, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1)
+        )
+
+    def forward(self, x):
+        return self._encoder(x)
+
+class Decoder(nn.Module):
+    def __init__(self, output_channels):
+        super().__init__()
+
+        self.deconv = nn.Sequential(
+            layer_init(nn.ConvTranspose2d(100, 128, 3, stride=2, padding=1, output_padding=1)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=0)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=0)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(32, output_channels, 3, stride=2, padding=1, output_padding=1)),
+            Transpose((0, 2, 3, 1)),
+        )
+
+    def forward(self, x):
+        return self.deconv(x)
 
 class Agent(nn.Module):
     def __init__(self, mapsize=10 * 10):
         super(Agent, self).__init__()
         self.mapsize = mapsize
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
-            nn.ReLU(),
+        h, w, c = envs.observation_space.shape
+        self.encoder = Encoder(c)
+        self.actor = Decoder(78)
+
+        self.critic = nn.Sequential(
             nn.Flatten(),
-            layer_init(nn.Linear(288, 256)),
-            nn.ReLU(), )
-        self.actor = layer_init(nn.Linear(256, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+            layer_init(nn.Linear(100, 100), std=1),
+            nn.ReLU(),
+            layer_init(nn.Linear(100, 1), std=1)
+        )
 
     def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+        return self.encoder(x)  # "bhwc" -> "bchw"
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
-        grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
+        grid_logits = logits.reshape(-1, envs.action_space.nvec[1:].sum())
         split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
 
         if action is None:
