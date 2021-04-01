@@ -30,7 +30,7 @@ if __name__ == "__main__":
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total-timesteps', type=int, default=40000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -190,8 +190,8 @@ envs = MicroRTSVecEnv(
     max_steps=20000,
     render_theme=2,
     ai2s=[microrts_ai.workerRushAI for _ in range(args.num_envs)],
-    map_path="maps/16x16/basesWorkers16x16.xml",
-    reward_weight=np.array([10.0, 0.1, 0.1, 0.02, 0.1, 0.4])
+    map_path="maps/10x10/basesWorkers10x10.xml",
+    reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
@@ -274,11 +274,11 @@ class ConvSequence(nn.Module):
 class ImpalaCNN(nn.Module):
     def __init__(self):
         super(ImpalaCNN, self).__init__()
-        h, w, c = 16, 16, 27
+        h, w, c = 10, 10, 27
         shape = (c, h, w)
 
         conv_seqs = []
-        for out_channels in [16, 32, 32]:
+        for out_channels in [10, 32, 32]:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
