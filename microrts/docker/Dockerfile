@@ -21,7 +21,7 @@ cd gym_microrts/microrts && bash build.sh && cd ..&& cd ..
 RUN pip install wandb==0.9.5
 
 WORKDIR /workspace/gym-microrts
-COPY ppo_gridnet_encode_decode.py /workspace
+COPY ppo_resnet.py /workspace
 COPY entrypoint.sh /usr/local/bin/
 RUN chmod 777 /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

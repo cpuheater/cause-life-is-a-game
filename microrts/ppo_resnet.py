@@ -173,9 +173,11 @@ writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
     '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
-
-    run = wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True,
-                     config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
+    run = wandb.init(
+        project=args.wandb_project_name, entity=args.wandb_entity,
+        # sync_tensorboard=True,
+        config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
+    wandb.tensorboard.patch(save=False)
     writer = SummaryWriter(f"/tmp/{experiment_name}")
 
 # TRY NOT TO MODIFY: seeding
@@ -278,7 +280,7 @@ class ImpalaCNN(nn.Module):
         shape = (c, h, w)
 
         conv_seqs = []
-        for out_channels in [10, 32, 32]:
+        for out_channels in [16, 32, 32]:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
