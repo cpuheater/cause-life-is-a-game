@@ -21,6 +21,7 @@ import numpy as np
 from copy import deepcopy
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from torch.distributions import kl_divergence
+from torch.nn.utils.rnn import pad_sequence
 
 class CartPoleNoVelEnv(CartPoleEnv):
     """Variant of CartPoleEnv with velocity information removed. This task requires memory to solve."""
@@ -167,23 +168,27 @@ class Buffer:
         self.advantages = a
         self.buffer_ready = True
 
-    def sample(self, batch_size=64, recurrent=False):
+    def sample(self, batch_size=64):
         if not self.buffer_ready:
             self._finish_buffer()
-            """
-            If we are returning a sample for a conventional network, we should
-            return a tensor of size [batch_size, dim], or a batch of timesteps.
-            """
-            random_indices = SubsetRandomSampler(range(self.size))
-            sampler = BatchSampler(random_indices, batch_size, drop_last=True)
+        random_indices = SubsetRandomSampler(range(len(self.traj_idx)-1))
+        sampler = BatchSampler(random_indices, batch_size, drop_last=True)
 
-            for i, idxs in enumerate(sampler):
-                obs     = self.obs[idxs]
-                actions    = self.actions[idxs]
-                returns    = self.returns[idxs]
-                advantages = self.advantages[idxs]
+        for traj_indices in sampler:
+          obs     = [self.obs[self.traj_idx[i]:self.traj_idx[i+1]]     for i in traj_indices]
+          actions    = [self.actions[self.traj_idx[i]:self.traj_idx[i+1]]    for i in traj_indices]
+          returns    = [self.returns[self.traj_idx[i]:self.traj_idx[i+1]]    for i in traj_indices]
+          advantages = [self.advantages[self.traj_idx[i]:self.traj_idx[i+1]] for i in traj_indices]
 
-                yield obs, actions, returns, advantages, 1
+          traj_mask  = [torch.ones_like(r) for r in returns]
+
+          states     = pad_sequence(obs, batch_first=False)
+          actions    = pad_sequence(actions, batch_first=False)
+          returns    = pad_sequence(returns, batch_first=False)
+          advantages = pad_sequence(advantages, batch_first=False)
+          traj_mask  = pad_sequence(traj_mask, batch_first=False)
+
+          yield states, actions, returns, advantages, traj_mask
 
 def merge_buffers(buffers):
     memory = Buffer()
@@ -316,20 +321,66 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+
+def create_layers(layer_fn, input_dim, layer_sizes):
+    ret = nn.ModuleList()
+    ret += [layer_fn(input_dim, layer_sizes[0])]
+    for i in range(len(layer_sizes)-1):
+        ret += [layer_fn(layer_sizes[i], layer_sizes[i+1])]
+    return ret
+
 class Agent(nn.Module):
-    def __init__(self):
+    def __init__(self, in_dim, layers):
         super(Agent, self).__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Linear(4, 256)),
-            nn.ReLU(),
-            layer_init(nn.Linear(256, 256)),
-            nn.ReLU()
-        )
-        self.actor = layer_init(nn.Linear(256, 2), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+        self.layers = create_layers(nn.LSTMCell, in_dim, layers)
+        self.actor = layer_init(nn.Linear(128, 2), std=0.01)
+        self.critic = layer_init(nn.Linear(128, 1), std=1)
+        self.init_hidden_state()
+        self.calculate_norm = False
+
+
+    def init_hidden_state(self, batch_size=1):
+        self.hidden = [torch.zeros(batch_size, l.hidden_size).to(device) for l in self.layers]
+        self.cells  = [torch.zeros(batch_size, l.hidden_size).to(device) for l in self.layers]
+
+    def _forward(self, x):
+        dims = len(x.size())
+        if dims == 3: # if we get a batch of trajectories
+            self.init_hidden_state(batch_size=x.size(1))
+
+            if self.calculate_norm:
+                self.latent_norm = 0
+
+            y = []
+            for t, x_t in enumerate(x):
+                for idx, layer in enumerate(self.layers):
+                    c, h = self.cells[idx], self.hidden[idx]
+                    self.hidden[idx], self.cells[idx] = layer(x_t, (h, c))
+                    x_t = self.hidden[idx]
+
+                    if self.calculate_norm:
+                        self.latent_norm += (torch.mean(torch.abs(x_t)) + torch.mean(torch.abs(self.cells[idx])))
+
+                y.append(x_t)
+            x = torch.stack([x_t for x_t in y])
+
+            if self.calculate_norm:
+                self.latent_norm /= len(x) * len(self.layers)
+        else:
+            if dims == 1: # if we get a single timestep (if not, assume we got a batch of single timesteps)
+                x = x.view(1, -1)
+
+            for idx, layer in enumerate(self.layers):
+                h, c = self.hidden[idx], self.cells[idx]
+                self.hidden[idx], self.cells[idx] = layer(x, (h, c))
+                x = self.hidden[idx]
+
+            if dims == 1:
+                x = x.view(-1)
+        return x
 
     def get_action(self, x, action=None):
-        x = self.network(x)
+        x = self._forward(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
@@ -337,12 +388,12 @@ class Agent(nn.Module):
         return action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x):
-        x = self.network(x)
+        x = self._forward(x)
         return self.critic(x)
 
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 
-agent = Agent().to(device)
+agent = Agent(4, layers=(128, 128)).to(device)
 old_agent  = deepcopy(agent)
 
 ray.init(local_mode=True)   #num_cpus=args.num_envs)
@@ -385,75 +436,10 @@ for update in range(1, num_updates+1):
     for w in workers:
         w.sync_policy.remote(agent_param_id)
 
-    buffers = ray.get([w.collect_experience.remote(300, 300) for w in workers])
+    buffers = ray.get([w.collect_experience.remote(300, 1250) for w in workers])
     memory = merge_buffers(buffers)
 
     total_steps = len(memory)
-
-    # TRY NOT TO MODIFY: prepare the execution of the game.
-    #for step in range(0, args.num_steps):
-    #    global_step += 1 * args.num_envs
-    #    obs[step] = next_obs
-    #    dones[step] = next_done
-
-    # ALGO LOGIC: put action logic here
-    #    with torch.no_grad():
-    #        values[step] = agent.get_value(obs[step]).flatten()
-    #        action, logproba, _ = agent.get_action(obs[step])
-
-    #    actions[step] = action
-    #    logprobs[step] = logproba
-
-    # TRY NOT TO MODIFY: execute the game and log data.
-    #    next_obs, rs, ds, infos = envs.step(action)
-    #    rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-
-    #    for info in infos:
-    #        if 'episode' in info.keys():
-    #            print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-    #            writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
-    #            break
-
-    # bootstrap reward if not done. reached the batch limit
-    #    with torch.no_grad():
-    #        last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
-    #        if args.gae:
-    #            advantages = torch.zeros_like(rewards).to(device)
-    #            lastgaelam = 0
-    #            for t in reversed(range(args.num_steps)):
-    #                if t == args.num_steps - 1:
-    #                    nextnonterminal = 1.0 - next_done
-    #                    nextvalues = last_value
-    #                else:
-    #                    nextnonterminal = 1.0 - dones[t+1]
-    #                    nextvalues = values[t+1]
-    #                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-    #                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
-    #            returns = advantages + values
-    #        else:
-    #            returns = torch.zeros_like(rewards).to(device)
-    #            for t in reversed(range(args.num_steps)):
-    #                if t == args.num_steps - 1:
-    #                    nextnonterminal = 1.0 - next_done
-    #                    next_return = last_value
-    ##                else:
-    #                    nextnonterminal = 1.0 - dones[t+1]
-    #                    next_return = returns[t+1]
-    #                returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
-    #            advantages = returns - values
-
-    # flatten the batch
-    #b_obs = obs.reshape((-1,)+envs.observation_space.shape)
-    #b_logprobs = logprobs.reshape(-1)
-    #b_actions = actions.reshape((-1,)+envs.action_space.shape)
-    #b_advantages = advantages.reshape(-1)
-    #b_returns = returns.reshape(-1)
-    #b_values = values.reshape(-1)
-
-    # Optimizaing the policy and value network
-    #target_agent = Agent(envs).to(device)
-    #inds = np.arange(args.batch_size,)
-
 
     for i_epoch_pi in range(args.update_epochs):
         # for start in range(0, args.batch_size, args.minibatch_size):
@@ -462,16 +448,17 @@ for update in range(1, num_updates+1):
             actions = actions.squeeze()
             with torch.no_grad():
                 action, log_probs, entropy = old_agent.get_action(states, actions)
+                log_probs = log_probs.sum(-1, keepdim=True)
 
             if args.norm_adv:
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             action, new_log_probs, entropy = agent.get_action(states, actions)
-            #log_probs  = pdf.log_prob(actions).sum(-1, keepdim=True)
+            new_log_probs  = new_log_probs.sum(-1, keepdim=True)
 
             ratio      = ((new_log_probs - log_probs)).exp()
-            cpi_loss   = ratio * advantages.squeeze() * mask #.squeeze()
-            clip_loss  = ratio.clamp(0.8, 1.2) * advantages * mask
+            cpi_loss   = ratio * advantages.squeeze() * mask.squeeze()
+            clip_loss  = ratio.clamp(0.8, 1.2) * advantages.squeeze() * mask.squeeze()
             #clip_loss  = ratio.clamp(0.8, 1.2) * advantages.squeeze() * mask.squeeze()
             pg_loss = -torch.min(cpi_loss, clip_loss).mean()
             new_values = agent.get_value(states)

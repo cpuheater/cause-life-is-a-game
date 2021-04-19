@@ -471,7 +471,7 @@ for update in range(1, num_updates+1):
 
             ratio      = ((new_log_probs - log_probs)).exp()
             cpi_loss   = ratio * advantages.squeeze() * mask #.squeeze()
-            clip_loss  = ratio.clamp(0.8, 1.2) * advantages * mask
+            clip_loss  = ratio.clamp(0.8, 1.2) * advantages.squeeze() * mask
             #clip_loss  = ratio.clamp(0.8, 1.2) * advantages.squeeze() * mask.squeeze()
             pg_loss = -torch.min(cpi_loss, clip_loss).mean()
             new_values = agent.get_value(states)
