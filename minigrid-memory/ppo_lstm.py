@@ -9,6 +9,7 @@ from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
 from gym_minigrid.wrappers import *
 cv2.ocl.setUseOpenCL(False)
+from matplotlib import pyplot as plt
 
 
 class ImageToPyTorch(gym.ObservationWrapper):
@@ -58,7 +59,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=3e-4,
+    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -78,10 +79,8 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--rnn-hidden-size', type=int, default=256,
-                        help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=8,
-                        help='seq length')
+    parser.add_argument('--frame-skip', type=int, default=4,
+                        help='frame skip')
 
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
@@ -100,24 +99,26 @@ if __name__ == "__main__":
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.2,
+    parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
-                         help="the K epochs to update the policy")
+                        help="the K epochs to update the policy")
     parser.add_argument('--kle-stop', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                         help='If toggled, the policy updates will be early stopped w.r.t target-kl')
+                        help='If toggled, the policy updates will be early stopped w.r.t target-kl')
     parser.add_argument('--kle-rollback', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                         help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
+                        help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
     parser.add_argument('--target-kl', type=float, default=0.03,
-                         help='the target-kl variable that is referred by --kl')
+                        help='the target-kl variable that is referred by --kl')
     parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                         help='Use GAE for advantage computation')
+                        help='Use GAE for advantage computation')
     parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help="Toggles advantages normalization")
+                        help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help="Toggle learning rate annealing for policy and value networks")
+                        help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+                        help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+    parser.add_argument('--rnn-hidden-size', type=int, default=128,
+                        help='rnn hidden size')
 
     args = parser.parse_args()
     #if not args.seed:
@@ -133,16 +134,15 @@ class InfoWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
-        vis_obs = self.env.get_obs_render(obs["image"], tile_size=12) / 255.
         self._rewards = []
-        return vis_obs
+        return obs["image"]
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self._rewards.append(reward)
         ## Retrieve the RGB frame of the agent's vision
-        #vis_obs = self._env.get_obs_render(obs["image"], tile_size=12) / 255.
-        vis_obs = self.env.get_obs_render(obs["image"], tile_size=12) / 255.
+        vis_obs = obs["image"]
+
         ## Render the environment in realtime
         #if self._realtime_mode:
         #    self._env.render(tile_size=96)
@@ -158,24 +158,10 @@ class InfoWrapper(gym.Wrapper):
 class WarpFrame(gym.ObservationWrapper):
     def __init__(self, env, width=84, height=84):
         super().__init__(env)
-        self._width = width
-        self._height = height
-        num_colors = 3
-        new_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(self._height, self._width, num_colors),
-            dtype=np.uint8,
-        )
-        self.observation_space = new_space
-        original_space = self.observation_space
-        self.observation_space = new_space
-        assert original_space.dtype == np.uint8 and len(original_space.shape) == 3
+        self.observation_space = env.observation_space.spaces['image']
 
     def observation(self, obs):
-        frame = obs
-        frame = cv2.resize(frame, (self._width, self._height), interpolation=cv2.INTER_AREA)
-        return frame
+        return obs
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -201,7 +187,7 @@ class VecPyTorch(VecEnvWrapper):
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
-        '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+    '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
@@ -228,9 +214,9 @@ def make_env(seed):
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
 envs = VecPyTorch(
-         SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-         device
-     )
+    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+    device
+)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
@@ -247,165 +233,131 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+
+def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn_hidden_states, masks):
+    def _flatten_helper(T, N, _tensor):
+        return _tensor.view(T * N, *_tensor.size()[2:])
+
+    assert args.num_envs >= args.n_minibatch, (
+        "PPO requires the number of envs ({}) "
+        "to be greater than or equal to the number of "
+        "PPO mini batches ({}).".format(args.num_envs, args.n_minibatch))
+    num_envs_per_batch = args.num_envs // args.n_minibatch
+    perm = torch.randperm(args.num_envs)
+    for start_ind in range(0, args.num_envs, num_envs_per_batch):
+
+        a_rnn_hidden_states = []
+        a_obs = []
+        a_actions = []
+        a_values = []
+        a_returns = []
+        a_masks = []
+        a_logprobs = []
+        a_advantages = []
+
+        for offset in range(num_envs_per_batch):
+            ind = perm[start_ind + offset]
+            a_rnn_hidden_states.append(rnn_hidden_states[0:1, :, ind])
+            a_obs.append(obs[:, ind])
+            a_actions.append(actions[:, ind])
+            a_values.append(values[:, ind])
+            a_returns.append(returns[:, ind])
+            a_masks.append(masks[:, ind])
+            a_logprobs.append(logprobs[:, ind])
+            a_advantages.append(advantages[:, ind])
+
+        T, N = args.num_steps, num_envs_per_batch
+
+        b_rnn_hidden_states = torch.cat(a_rnn_hidden_states, 0).transpose(0, 1)
+        b_obs = _flatten_helper(T, N, torch.stack(a_obs, 1))
+        b_actions = _flatten_helper(T, N, torch.stack(a_actions, 1))
+        b_values = _flatten_helper(T, N, torch.stack(a_values, 1))
+        b_return = _flatten_helper(T, N, torch.stack(a_returns, 1))
+        b_masks = _flatten_helper(T, N, torch.stack(a_masks, 1))
+        b_logprobs = _flatten_helper(T, N, torch.stack(a_logprobs, 1))
+        b_advantages = _flatten_helper(T, N, torch.stack(a_advantages, 1))
+
+        yield b_obs, b_rnn_hidden_states, b_actions, \
+              b_values, b_return, b_masks, b_logprobs, b_advantages
+
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3, rnn_input_size=512, rnn_hidden_size=512):
+    def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            #Scale(1/255),
-            layer_init(nn.Conv2d(in_channels=frames, out_channels=32, kernel_size=8,
-                                 stride=4, padding=0)),
-            nn.LeakyReLU(),
-            layer_init(nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, padding=0)),
-            nn.LeakyReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.LeakyReLU(),
-            nn.Flatten()
+            # Scale(1/255),
+            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(980, 128)),
+            nn.ReLU()
         )
 
-        self.rnn = nn.LSTM(3136, rnn_hidden_size)
-        for name, param in self.rnn.named_parameters():
+        self.lstm = nn.LSTM(args.rnn_hidden_size, args.rnn_hidden_size)
+        for name, param in self.lstm.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
-        self.lin_hidden = layer_init(nn.Linear(rnn_hidden_size, 512))
-        self.lin_value = layer_init(nn.Linear(512, 512))
-        self.lin_policy = layer_init(nn.Linear(512, 512))
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=np.sqrt(0.01))
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
-        self.leaky_relu = nn.LeakyReLU()
 
-    def forward(self, x, rnn_hidden_state, rnn_cell_state, sequence_length = 1):
+        self.actor = layer_init(nn.Linear(128, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(128, 1), std=1)
+
+    def forward(self, x, hxs, mask):
         x = self.network(x)
-        if sequence_length == 1:
-            x, (rnn_hidden_state, rnn_cell_state) = self.rnn(x.unsqueeze(0), (rnn_hidden_state, rnn_cell_state))
+        hs = hxs[0]
+        cs = hxs[1]
+        if x.size(0) == hs.size(0):
+            x, (hs, cs) = self.lstm(x.unsqueeze(0), ((hs * mask).unsqueeze(0), (cs * mask).unsqueeze(0)))
+            x = x.squeeze()
         else:
-            x_shape = x.size()
-            x = x.view(sequence_length, (x_shape[0] // sequence_length), x_shape[1])
-            (rnn_hidden_state, rnn_cell_state) = init_recurrent_cell_states(x_shape[0] // sequence_length)
-            x, (rnn_hidden_state, rnn_cell_state) = self.rnn(x, (rnn_hidden_state, rnn_cell_state))
-            x = x.view(x.shape[0] * x.shape[1], x.shape[2])
-        return x.squeeze(0), (rnn_hidden_state, rnn_cell_state)
+            N = hs.size(0)
+            T = int(x.size(0) / N)
+            x = x.view(T, N, x.size(1))
+            masks = mask.view(T, N)
+            has_zeros = ((masks[1:] == 0.0) \
+                         .any(dim=-1)
+                         .nonzero()
+                         .squeeze()
+                         .cpu())
 
-    def get_action(self, x, rnn_hidden_state, rnn_cell_state, sequence_length=1, action=None):
-        x, (rnn_hidden_state, rnn_cell_state) = self.forward(x, rnn_hidden_state, rnn_cell_state, sequence_length)
-        x = self.leaky_relu(self.lin_hidden(x))
-        value = self.leaky_relu(self.lin_value(x))
-        policy = self.leaky_relu(self.lin_policy(x))
-        logits = self.actor(policy)
-        value = self.critic(value)
+            if has_zeros.dim() == 0:
+                has_zeros = [has_zeros.item() + 1]
+            else:
+                has_zeros = (has_zeros + 1).numpy().tolist()
 
+            has_zeros = [0] + has_zeros + [T]
+            hs = hs.unsqueeze(0)
+            cs = cs.unsqueeze(0)
+            outputs = []
+            for i in range(len(has_zeros) - 1):
+                start_idx = has_zeros[i]
+                end_idx = has_zeros[i + 1]
+                rnn_scores, (hs, cs) = self.lstm(
+                    x[start_idx:end_idx],
+                    (hs * masks[start_idx].view(1, -1, 1), cs * masks[start_idx].view(1, -1, 1)))
+                outputs.append(rnn_scores)
+            x = torch.cat(outputs, dim=0)
+            x = x.view(T * N, -1)
+        hs = hs.squeeze(0)
+        cs = cs.squeeze(0)
+        hxs = torch.stack([hs, cs])
+        return x, hxs
+
+    def get_action(self, x, rnn_hidden_state, mask, action=None):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
+        logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return value, (rnn_cell_state, rnn_hidden_state), action, probs.log_prob(action), probs.entropy()
+        return rnn_hidden_state, action, probs.log_prob(action), probs.entropy()
 
-    def get_value(self, x, rnn_hidden_state, rnn_cell_state):
-        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, rnn_cell_state)
-        x = self.leaky_relu(self.lin_hidden(x))
-        value = self.leaky_relu(self.lin_value(x))
-        return self.critic(value)
+    def get_value(self, x, rnn_hidden_state, mask):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
+        return self.critic(x)
 
-def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns):
-
-    samples = {
-        'vis_obs': obs.permute(1,0,2, 3, 4),
-        'actions': actions.permute(1,0),
-        'values': values.permute(1,0),
-        'log_probs': logprobs.permute(1,0),
-        'advantages': advantages.permute(1,0),
-        'returns': returns.permute(1,0),
-        'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32)
-    }
-
-    max_sequence_length = 1
-    for w in range(args.num_envs):
-        if len(episode_done_indices[w]) == 0 or episode_done_indices[w][-1] != args.num_steps - 1:
-            episode_done_indices[w].append(args.num_steps - 1)
-
-    for key, value in samples.items():
-        sequences = []
-        for w in range(args.num_envs):
-            start_index = 0
-            for done_index in episode_done_indices[w]:
-                # Split trajectory into episodes
-                episode = value[w, start_index:done_index + 1]
-                start_index = done_index + 1
-                # Split episodes into sequences
-                if args.seq_length > 0:
-                    for start in range(0, len(episode), args.seq_length):
-                        end = start + args.seq_length
-                        sequences.append(episode[start:end])
-                        max_sequence_length = args.seq_length
-                else:
-                    # If the sequence length is not set to a proper value, sequences will be based on episodes
-                    sequences.append(episode)
-                    max_sequence_length = len(episode) if len(
-                        episode) > max_sequence_length else max_sequence_length
-
-        # Apply zero-padding to ensure that each episode has the same length
-        # Therfore we can train batches of episodes in parallel instead of one episode at a time
-        for i, sequence in enumerate(sequences):
-            sequences[i] =  pad_sequence(sequence, max_sequence_length)
-
-        # Stack episodes (target shape: (Episode, Step, Data ...) & apply data to the samples dict
-        samples[key] = np.stack(sequences, axis=0)
-
-    # Store important information
-    num_sequences = len(samples["values"])
-    actual_sequence_length = max_sequence_length
-
-    # Flatten all samples
-    samples_flat = {}
-    for key, value in samples.items():
-        value = value.reshape(value.shape[0] * value.shape[1], *value.shape[2:])
-        samples_flat[key] = torch.tensor(value, dtype=torch.float32, device=device)
-
-
-    #generator
-    num_sequences_per_batch = num_sequences // args.n_minibatch
-    num_sequences_per_batch = [
-                                  num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
-    remainder = num_sequences % args.n_minibatch
-    for i in range(remainder):
-        num_sequences_per_batch[
-            i] += 1  # Add the remainder if the episode count and the number of mini batches do not share a common divider
-    # Prepare indices, but only shuffle the episode indices and not the entire batch to ensure that sequences of episodes are maintained
-    indices = np.arange(0, num_sequences * args.seq_length).reshape(num_sequences, args.seq_length)
-    sequence_indices = torch.randperm(num_sequences)
-    start = 0
-    for num_sequences in num_sequences_per_batch:
-        end = start + num_sequences
-        mini_batch_indices = indices[sequence_indices[start:end]].reshape(-1)
-        mini_batch = {}
-        for key, value in samples_flat.items():
-            mini_batch[key] = value[mini_batch_indices].to(device)
-        start = end
-        yield mini_batch
-
-def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
-
-def init_recurrent_cell_states(num_sequences):
-        hxs = torch.zeros((num_sequences), args.rnn_hidden_size, dtype=torch.float32, device=device, requires_grad=True).unsqueeze(0).to(device)
-        cxs = torch.zeros((num_sequences), args.rnn_hidden_size, dtype=torch.float32, device=device, requires_grad=True).unsqueeze(0).to(device)
-        return hxs, cxs
-
-def pad_sequence(sequence, target_length):
-    if isinstance(sequence, torch.Tensor):
-        sequence = sequence.cpu().numpy()
-    delta_length = target_length - len(sequence)
-    if delta_length <= 0:
-        return sequence
-    if len(sequence.shape) > 1:
-        padding = np.full(((delta_length,) + sequence.shape[1:]), sequence[0], dtype=sequence.dtype)
-    else:
-        padding = np.full(delta_length, sequence[0], dtype=sequence.dtype)
-    return np.concatenate((padding, sequence), axis=0)
-
-rnn_hidden_size = args.rnn_hidden_size
-
-agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=args.rnn_hidden_size).to(device)
+agent = Agent(envs).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
@@ -418,6 +370,8 @@ logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+rnn_hidden_states = torch.zeros((args.num_steps, 2, args.num_envs, args.rnn_hidden_size)).to(device)
+masks = torch.ones((args.num_steps, args.num_envs, 1)).to(device)
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
@@ -425,10 +379,10 @@ global_step = 0
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
 next_obs = envs.reset()
 next_done = torch.zeros(args.num_envs).to(device)
-mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done])
-rnn_hidden_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
-rnn_cell_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
 num_updates = args.total_timesteps // args.batch_size
+mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
+rnn_hidden_state = torch.zeros((2, args.num_envs, args.rnn_hidden_size)).to(device)
+
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
     if args.anneal_lr:
@@ -441,12 +395,14 @@ for update in range(1, num_updates+1):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
+        rnn_hidden_states[step] = rnn_hidden_state
+        masks[step] = mask
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], rnn_hidden_state, rnn_cell_state)
+            values[step] = agent.get_value(obs[step], rnn_hidden_state, mask).flatten()
+            rnn_hidden_state, action, logproba, _ = agent.get_action(obs[step], rnn_hidden_state, mask)
 
-        values[step] = value.flatten()
         actions[step] = action
         logprobs[step] = logproba
 
@@ -454,18 +410,16 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
-        rnn_hidden_state = rnn_hidden_state * mask
-        rnn_cell_state = rnn_cell_state * mask
+
         for info in infos:
             if info and 'reward' in info.keys():
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
-                print(info['reward'])
             if info and 'length' in info.keys():
                 writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), rnn_hidden_state, rnn_cell_state).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), rnn_hidden_state, mask).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -491,23 +445,21 @@ for update in range(1, num_updates+1):
                 returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
             advantages = returns - values
 
-    nonzero = torch.nonzero(dones)
-    dones_index = [[]] * dones.shape[1]
-    for index, value in zip(nonzero[:, 1], nonzero[:, 0]):
-        tmp = dones_index[index.item()]
-        tmp = tmp[:]
-        tmp.append(value.item())
-        dones_index[index.item()] = tmp
-
     # Optimizaing the policy and value network
     for i_epoch_pi in range(args.update_epochs):
-        data_generator = recurrent_generator(dones_index, obs, actions, logprobs, values, advantages, returns)
+        data_generator = recurrent_generator(obs, logprobs, actions, advantages, returns, values,
+                                             rnn_hidden_states, masks)
         for batch in data_generator:
-            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages = batch['vis_obs'], batch['actions'], batch['values'], batch['returns'], batch['log_probs'], batch['advantages']
+            b_obs, b_rnn_hidden_states, b_actions, b_values, b_returns, b_masks, b_logprobs, b_advantages = batch
+
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, None, None, sequence_length=args.seq_length, action=b_actions.long())
+            _, _, newlogproba, entropy = agent.get_action(
+                b_obs,
+                b_rnn_hidden_states,
+                b_masks,
+                b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 
             # Stats
@@ -520,7 +472,7 @@ for update in range(1, num_updates+1):
             entropy_loss = entropy.mean()
 
             # Value loss
-            new_values = newvalues.view(-1)
+            new_values = agent.get_value(b_obs, b_rnn_hidden_states, b_masks).view(-1)
             if args.clip_vloss:
                 v_loss_unclipped = ((new_values - b_returns) ** 2)
                 v_clipped = b_values + torch.clamp(new_values - b_values, -args.clip_coef, args.clip_coef)
@@ -537,12 +489,9 @@ for update in range(1, num_updates+1):
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
-        if args.kle_stop:
-            if approx_kl > args.target_kl:
-                break
+
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
-    writer.add_scalar("charts/mean_reward", np.mean(rewards.cpu().numpy()), global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
     writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
     writer.add_scalar("losses/entropy", entropy.mean().item(), global_step)
