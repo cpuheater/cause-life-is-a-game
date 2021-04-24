@@ -7,7 +7,7 @@ from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
-
+from gym_minigrid.wrappers import *
 cv2.ocl.setUseOpenCL(False)
 
 
@@ -54,13 +54,13 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="basic",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=7e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total-timesteps', type=int, default=1500009,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -94,7 +94,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.0,
+    parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=False,
                          help='Use GAE for advantage computation')
@@ -144,26 +144,6 @@ class WarpFrame(gym.ObservationWrapper):
 
     def observation(self, obs):
         return obs
-
-class VecPyTorch(VecEnvWrapper):
-    def __init__(self, venv, device):
-        super(VecPyTorch, self).__init__(venv)
-        self.device = device
-
-    def reset(self):
-        obs = self.venv.reset()
-        obs = torch.from_numpy(obs).float().to(self.device)
-        return obs
-
-    def step_async(self, actions):
-        actions = actions.cpu().numpy()
-        self.venv.step_async(actions)
-
-    def step_wait(self):
-        obs, reward, done, info = self.venv.step_wait()
-        obs = torch.from_numpy(obs).float().to(self.device)
-        reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
-        return obs, reward, done, info
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -238,18 +218,16 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs, frames=3, rnn_input_size=512, rnn_hidden_size=512):
         super(Agent, self).__init__()
+
         self.network = nn.Sequential(
-            Scale(1/255),
-            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
+            # Scale(1/255),
+            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, rnn_hidden_size)),
-            nn.ReLU()
-        )
+            layer_init(nn.Linear(980, 256)),
+            nn.ReLU())
 
         self.gru = nn.GRUCell(rnn_input_size, rnn_hidden_size)
         nn.init.orthogonal_(self.gru.weight_ih.data)
@@ -292,6 +270,10 @@ class Agent(nn.Module):
 
 agent = Agent(envs, rnn_input_size=args.rnn_hidden_size, rnn_hidden_size=args.rnn_hidden_size).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+
+torch.optim.RMSprop(agent.parameters(), lr=args.learning_rate)
+
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
@@ -342,10 +324,10 @@ for update in range(1, num_updates+1):
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
 
         for info in infos:
-            if 'Episode_Total_Reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
-            if 'Episode_Total_Len' in info.keys():
-                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
+            if info and 'reward' in info.keys():
+                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
+            if info and 'length' in info.keys():
+                writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
