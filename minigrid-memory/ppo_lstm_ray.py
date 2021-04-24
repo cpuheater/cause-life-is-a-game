@@ -104,6 +104,7 @@ config["model"]["fcnet_hiddens"] = [256, 256]
 config["model"]["fcnet_activation"] = "relu"
 config["num_sgd_iter"] = 8
 config["num_workers"] = 0
+config["framework"] = "torch"
 
 
 min_reward = 0.001

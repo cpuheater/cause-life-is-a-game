@@ -1,69 +1,70 @@
-# https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
-
-import numpy as np
-from collections import deque
-import gym
-from gym import spaces
-import cv2
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-import skimage.transform
-from gym_minigrid.wrappers import *
-cv2.ocl.setUseOpenCL(False)
-from matplotlib import pyplot as plt
-
-
-class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
-
-    def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.uint8,
-        )
-
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
-
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
 import argparse
 from distutils.util import strtobool
 import numpy as np
 import gym
 from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 
+from gym.envs.classic_control import CartPoleEnv
+from gym import spaces
+import numpy as np
+
+import gym
+from gym.spaces import Discrete
+import random
+
+class RepeatAfterMeEnv(gym.Env):
+    """Env in which the observation at timestep minus n must be repeated."""
+
+    def __init__(self, repeat_delay=1):
+        self.observation_space = Discrete(2)
+        self.action_space = Discrete(2)
+        # Note: Set `repeat_delay` to 0 for simply repeating the seen
+        # observation (no delay).
+        self.delay = repeat_delay
+        self.episode_len = 100
+        self.history = []
+
+    def reset(self):
+        self.history = [0] * self.delay
+        return self._next_obs()
+
+    def step(self, action):
+        if action == self.history[-(1 + self.delay)]:
+            reward = 1
+        else:
+            reward = -1
+        done = len(self.history) > self.episode_len
+        return self._next_obs(), reward, done, {}
+
+    def _next_obs(self):
+        token = random.choice([0, 1])
+        self.history.append(token)
+        return token
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
+    parser.add_argument('--gym-id', type=str, default="CartPole-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total-timesteps', type=int, default=1000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -77,17 +78,13 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=0.01,
-                        help='scale reward')
-    parser.add_argument('--frame-skip', type=int, default=4,
-                        help='frame skip')
 
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=8,
+    parser.add_argument('--num-envs', type=int, default=4,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=256,
+    parser.add_argument('--num-steps', type=int, default=16,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -97,7 +94,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.01,
+    parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
@@ -117,51 +114,15 @@ if __name__ == "__main__":
                         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
-    parser.add_argument('--rnn-hidden-size', type=int, default=256,
+    parser.add_argument('--rnn-hidden-size', type=int, default=128,
                         help='rnn hidden size')
 
     args = parser.parse_args()
-    #if not args.seed:
-    args.seed = int(time.time())
+    if not args.seed:
+        args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
-
-class InfoWrapper(gym.Wrapper):
-    def __init__(self, env):
-        gym.Wrapper.__init__(self, env)
-        self._rewards = []
-
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        self._rewards = []
-        return obs["image"]
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self._rewards.append(reward)
-        ## Retrieve the RGB frame of the agent's vision
-        vis_obs = obs["image"]
-
-        ## Render the environment in realtime
-        #if self._realtime_mode:
-        #    self._env.render(tile_size=96)
-        #    time.sleep(0.5)
-
-        # Wrap up episode information once completed (i.e. done)
-        if done:
-            info = {"reward": sum(self._rewards),
-                    "length": len(self._rewards)}
-
-        return vis_obs, reward, done, info
-
-class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84):
-        super().__init__(env)
-        self.observation_space = env.observation_space.spaces['image']
-
-    def observation(self, obs):
-        return obs
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -199,24 +160,25 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-def make_env(seed):
+def make_env(gym_id, seed, idx):
     def thunk():
-        env = gym.make(args.gym_id)
-        env = InfoWrapper(env)
-        env = WarpFrame(env)
-        env = wrap_pytorch(env)
+
+        env = RepeatAfterMeEnv(2) #gym.make(gym_id) #CartPoleNoVelEnv()
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        if args.capture_video:
+            if idx == 0:
+                env = Monitor(env, f'videos/{experiment_name}')
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
     return thunk
-
-#envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
+envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
-envs = VecPyTorch(
-    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-    device
-)
+#     envs = VecPyTorch(
+#         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
+#         device
+#     )
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
@@ -232,7 +194,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
-
 
 def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn_hidden_states, masks):
     def _flatten_helper(T, N, _tensor):
@@ -281,16 +242,13 @@ def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn
               b_values, b_return, b_masks, b_logprobs, b_advantages
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3):
+    def __init__(self, envs):
         super(Agent, self).__init__()
+        print(envs.observation_space.shape)
         self.network = nn.Sequential(
-            # Scale(1/255),
-            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
+            layer_init(nn.Linear(2, 128)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(980, 256)),
+            layer_init(nn.Linear(128, args.rnn_hidden_size)),
             nn.ReLU()
         )
 
@@ -300,9 +258,8 @@ class Agent(nn.Module):
                 nn.init.constant_(param, 0)
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
-
-        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+        self.actor = layer_init(nn.Linear(args.rnn_hidden_size, 2), std=0.01)
+        self.critic = layer_init(nn.Linear(args.rnn_hidden_size, 1), std=1)
 
     def forward(self, x, hxs, mask):
         x = self.network(x)
@@ -373,6 +330,7 @@ values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rnn_hidden_states = torch.zeros((args.num_steps, 2, args.num_envs, args.rnn_hidden_size)).to(device)
 masks = torch.ones((args.num_steps, args.num_envs, 1)).to(device)
 
+
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
@@ -382,7 +340,6 @@ next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
 mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
 rnn_hidden_state = torch.zeros((2, args.num_envs, args.rnn_hidden_size)).to(device)
-
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
     if args.anneal_lr:
@@ -412,10 +369,10 @@ for update in range(1, num_updates+1):
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
 
         for info in infos:
-            if info and 'reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
-            if info and 'length' in info.keys():
-                writer.add_scalar("charts/episode_length", info['length'], global_step)
+            if 'episode' in info.keys():
+                print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+                writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+                break
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():

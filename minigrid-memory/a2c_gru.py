@@ -7,9 +7,8 @@ from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
-from gym_minigrid.wrappers import *
+
 cv2.ocl.setUseOpenCL(False)
-from matplotlib import pyplot as plt
 
 
 class ImageToPyTorch(gym.ObservationWrapper):
@@ -44,20 +43,18 @@ import argparse
 from distutils.util import strtobool
 import numpy as np
 import gym
-from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
-from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
+from gym.spaces import Discrete, Box
 import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='PPO agent')
+    parser = argparse.ArgumentParser(description='A2C agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
+    parser.add_argument('--gym-id', type=str, default="basic",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -81,13 +78,13 @@ if __name__ == "__main__":
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
+    parser.add_argument('--rnn-hidden-size', type=int, default=256,
+                        help='rnn hidden size')
 
     # Algorithm specific arguments
-    parser.add_argument('--n-minibatch', type=int, default=4,
-                        help='the number of mini batch')
     parser.add_argument('--num-envs', type=int, default=8,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=256,
+    parser.add_argument('--num-steps', type=int, default=5,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -97,71 +94,87 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.01,
+    parser.add_argument('--max-grad-norm', type=float, default=0.0,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.2,
-                        help="the surrogate clipping coefficient")
-    parser.add_argument('--update-epochs', type=int, default=4,
-                        help="the K epochs to update the policy")
-    parser.add_argument('--kle-stop', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                        help='If toggled, the policy updates will be early stopped w.r.t target-kl')
-    parser.add_argument('--kle-rollback', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                        help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
-    parser.add_argument('--target-kl', type=float, default=0.03,
-                        help='the target-kl variable that is referred by --kl')
-    parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                        help='Use GAE for advantage computation')
+    parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=False,
+                         help='Use GAE for advantage computation')
     parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                        help="Toggles advantages normalization")
+                          help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                        help="Toggle learning rate annealing for policy and value networks")
-    parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                        help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
-    parser.add_argument('--rnn-hidden-size', type=int, default=256,
-                        help='rnn hidden size')
+                          help="Toggle learning rate annealing for policy and value networks")
 
     args = parser.parse_args()
     #if not args.seed:
     args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
-args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-class InfoWrapper(gym.Wrapper):
-    def __init__(self, env):
-        gym.Wrapper.__init__(self, env)
-        self._rewards = []
 
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        self._rewards = []
-        return obs["image"]
+class ViZDoomEnv:
+    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
+        # assign observation space
+        channel_num = 3
+
+        self.observation_shape = (channel_num, 64, 112)
+        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
+        self.reward_scale = reward_scale
+        game = DoomGame()
+
+        game.load_config(f"./scenarios/{game_config}.cfg")
+        game.set_screen_resolution(ScreenResolution.RES_160X120)
+        game.set_screen_format(ScreenFormat.CRCGCB)
+
+        num_buttons = game.get_available_buttons_size()
+        self.action_space = Discrete(num_buttons)
+        actions = [([False] * num_buttons) for i in range(num_buttons)]
+        for i in range(num_buttons):
+            actions[i][i] = True
+        self.actions = actions
+        self.frame_skip = frame_skip
+
+        game.set_seed(seed)
+        game.set_window_visible(render)
+        game.init()
+
+        self.game = game
+
+    def get_current_input(self):
+        state = self.game.get_state()
+        res_source = []
+        res_source.append(state.screen_buffer)
+        res = np.vstack(res_source)
+        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
+        self.last_input = res
+        return res
 
     def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self._rewards.append(reward)
-        ## Retrieve the RGB frame of the agent's vision
-        vis_obs = obs["image"]
-
-        ## Render the environment in realtime
-        #if self._realtime_mode:
-        #    self._env.render(tile_size=96)
-        #    time.sleep(0.5)
-
-        # Wrap up episode information once completed (i.e. done)
+        info = {}
+        reward = self.game.make_action(self.actions[action], self.frame_skip)
+        done = self.game.is_episode_finished()
         if done:
-            info = {"reward": sum(self._rewards),
-                    "length": len(self._rewards)}
+            ob = self.last_input
+        else:
+            ob = self.get_current_input()
+        # reward scaling
+        reward = reward * self.reward_scale
+        self.total_reward += reward
+        self.total_length += 1
 
-        return vis_obs, reward, done, info
+        if done:
+            info['Episode_Total_Reward'] = self.total_reward
+            info['Episode_Total_Len'] = self.total_length
 
-class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84):
-        super().__init__(env)
-        self.observation_space = env.observation_space.spaces['image']
+        return ob, reward, done, info
 
-    def observation(self, obs):
-        return obs
+    def reset(self):
+        self.game.new_episode()
+        self.total_reward = 0
+        self.total_length = 0
+        ob = self.get_current_input()
+        return ob
+
+    def close(self):
+        self.game.close()
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -187,7 +200,7 @@ class VecPyTorch(VecEnvWrapper):
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
-    '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+        '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
@@ -201,11 +214,7 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
-        env = gym.make(args.gym_id)
-        env = InfoWrapper(env)
-        env = WarpFrame(env)
-        env = wrap_pytorch(env)
-        env.seed(seed)
+        env = ViZDoomEnv(seed, args.gym_id, render=True, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
@@ -214,9 +223,9 @@ def make_env(seed):
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
 envs = VecPyTorch(
-    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-    device
-)
+         SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+         device
+     )
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
@@ -233,144 +242,75 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-
-def recurrent_generator(obs, logprobs, actions, advantages, returns, values, rnn_hidden_states, masks):
-    def _flatten_helper(T, N, _tensor):
-        return _tensor.view(T * N, *_tensor.size()[2:])
-
-    assert args.num_envs >= args.n_minibatch, (
-        "PPO requires the number of envs ({}) "
-        "to be greater than or equal to the number of "
-        "PPO mini batches ({}).".format(args.num_envs, args.n_minibatch))
-    num_envs_per_batch = args.num_envs // args.n_minibatch
-    perm = torch.randperm(args.num_envs)
-    for start_ind in range(0, args.num_envs, num_envs_per_batch):
-
-        a_rnn_hidden_states = []
-        a_obs = []
-        a_actions = []
-        a_values = []
-        a_returns = []
-        a_masks = []
-        a_logprobs = []
-        a_advantages = []
-
-        for offset in range(num_envs_per_batch):
-            ind = perm[start_ind + offset]
-            a_rnn_hidden_states.append(rnn_hidden_states[0:1, :, ind])
-            a_obs.append(obs[:, ind])
-            a_actions.append(actions[:, ind])
-            a_values.append(values[:, ind])
-            a_returns.append(returns[:, ind])
-            a_masks.append(masks[:, ind])
-            a_logprobs.append(logprobs[:, ind])
-            a_advantages.append(advantages[:, ind])
-
-        T, N = args.num_steps, num_envs_per_batch
-
-        b_rnn_hidden_states = torch.cat(a_rnn_hidden_states, 0).transpose(0, 1)
-        b_obs = _flatten_helper(T, N, torch.stack(a_obs, 1))
-        b_actions = _flatten_helper(T, N, torch.stack(a_actions, 1))
-        b_values = _flatten_helper(T, N, torch.stack(a_values, 1))
-        b_return = _flatten_helper(T, N, torch.stack(a_returns, 1))
-        b_masks = _flatten_helper(T, N, torch.stack(a_masks, 1))
-        b_logprobs = _flatten_helper(T, N, torch.stack(a_logprobs, 1))
-        b_advantages = _flatten_helper(T, N, torch.stack(a_advantages, 1))
-
-        yield b_obs, b_rnn_hidden_states, b_actions, \
-              b_values, b_return, b_masks, b_logprobs, b_advantages
-
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3):
+    def __init__(self, envs, frames=3, rnn_input_size=512, rnn_hidden_size=512):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            # Scale(1/255),
-            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
+            Scale(1/255),
+            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(980, 256)),
+            layer_init(nn.Linear(2560, rnn_hidden_size)),
             nn.ReLU()
         )
 
-        self.lstm = nn.LSTM(args.rnn_hidden_size, args.rnn_hidden_size)
-        for name, param in self.lstm.named_parameters():
-            if 'bias' in name:
-                nn.init.constant_(param, 0)
-            elif 'weight' in name:
-                nn.init.orthogonal_(param, np.sqrt(2))
+        self.gru = nn.GRUCell(rnn_input_size, rnn_hidden_size)
+        nn.init.orthogonal_(self.gru.weight_ih.data)
+        nn.init.orthogonal_(self.gru.weight_hh.data)
+        self.gru.bias_ih.data.fill_(0)
+        self.gru.bias_hh.data.fill_(0)
 
-        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+        self.actor = layer_init(nn.Linear(rnn_hidden_size, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
-    def forward(self, x, hxs, mask):
+    def forward(self, x, rnn_hidden_state, mask):
         x = self.network(x)
-        hs = hxs[0]
-        cs = hxs[1]
-        if x.size(0) == hs.size(0):
-            x, (hs, cs) = self.lstm(x.unsqueeze(0), ((hs * mask).unsqueeze(0), (cs * mask).unsqueeze(0)))
-            x = x.squeeze()
+        if x.size(0) == rnn_hidden_state.size(0):
+            x = rnn_hidden_state = self.gru(x, rnn_hidden_state * mask)
         else:
-            N = hs.size(0)
+            N = rnn_hidden_state.size(0)
             T = int(x.size(0) / N)
             x = x.view(T, N, x.size(1))
-            masks = mask.view(T, N)
-            has_zeros = ((masks[1:] == 0.0) \
-                         .any(dim=-1)
-                         .nonzero()
-                         .squeeze()
-                         .cpu())
-
-            if has_zeros.dim() == 0:
-                has_zeros = [has_zeros.item() + 1]
-            else:
-                has_zeros = (has_zeros + 1).numpy().tolist()
-
-            has_zeros = [0] + has_zeros + [T]
-            hs = hs.unsqueeze(0)
-            cs = cs.unsqueeze(0)
+            mask = mask.view(T, N, 1)
             outputs = []
-            for i in range(len(has_zeros) - 1):
-                start_idx = has_zeros[i]
-                end_idx = has_zeros[i + 1]
-                rnn_scores, (hs, cs) = self.lstm(
-                    x[start_idx:end_idx],
-                    (hs * masks[start_idx].view(1, -1, 1), cs * masks[start_idx].view(1, -1, 1)))
-                outputs.append(rnn_scores)
-            x = torch.cat(outputs, dim=0)
+            for i in range(T):
+                rnn_hidden_state = self.gru(x[i], rnn_hidden_state * mask[i])
+                outputs.append(rnn_hidden_state)
+            x = torch.stack(outputs, dim=0)
             x = x.view(T * N, -1)
-        hs = hs.squeeze(0)
-        cs = cs.squeeze(0)
-        hxs = torch.stack([hs, cs])
-        return x, hxs
+        return x, rnn_hidden_state
 
     def get_action(self, x, rnn_hidden_state, mask, action=None):
         x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
+        value = self.critic(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return rnn_hidden_state, action, probs.log_prob(action), probs.entropy()
+        return value, rnn_hidden_state, action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x, rnn_hidden_state, mask):
         x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
         return self.critic(x)
 
-agent = Agent(envs).to(device)
+agent = Agent(envs, rnn_input_size=args.rnn_hidden_size, rnn_hidden_size=args.rnn_hidden_size).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
 
+
 # ALGO Logic: Storage for epoch data
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
 actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
-logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-rnn_hidden_states = torch.zeros((args.num_steps, 2, args.num_envs, args.rnn_hidden_size)).to(device)
+rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, args.rnn_hidden_size)).to(device)
 masks = torch.ones((args.num_steps, args.num_envs, 1)).to(device)
 
 # TRY NOT TO MODIFY: start the game
@@ -378,11 +318,10 @@ global_step = 0
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
 next_obs = envs.reset()
+rnn_hidden_state = torch.zeros((args.num_envs, args.rnn_hidden_size))
 next_done = torch.zeros(args.num_envs).to(device)
+mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done])
 num_updates = args.total_timesteps // args.batch_size
-mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
-rnn_hidden_state = torch.zeros((2, args.num_envs, args.rnn_hidden_size)).to(device)
-
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
     if args.anneal_lr:
@@ -397,14 +336,12 @@ for update in range(1, num_updates+1):
         dones[step] = next_done
         rnn_hidden_states[step] = rnn_hidden_state
         masks[step] = mask
-
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            values[step] = agent.get_value(obs[step], rnn_hidden_state, mask).flatten()
-            rnn_hidden_state, action, logproba, _ = agent.get_action(obs[step], rnn_hidden_state, mask)
+            value, rnn_hidden_state, action, logproba, _ = agent.get_action(obs[step], rnn_hidden_states[step], masks[step])
 
+        values[step] = value.flatten()
         actions[step] = action
-        logprobs[step] = logproba
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action)
@@ -412,10 +349,10 @@ for update in range(1, num_updates+1):
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
 
         for info in infos:
-            if info and 'reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
-            if info and 'length' in info.keys():
-                writer.add_scalar("charts/episode_length", info['length'], global_step)
+            if 'Episode_Total_Reward' in info.keys():
+                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
+            if 'Episode_Total_Len' in info.keys():
+                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
@@ -443,61 +380,32 @@ for update in range(1, num_updates+1):
                     nextnonterminal = 1.0 - dones[t+1]
                     next_return = returns[t+1]
                 returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
-            advantages = returns - values
 
-    # Optimizaing the policy and value network
-    for i_epoch_pi in range(args.update_epochs):
-        data_generator = recurrent_generator(obs, logprobs, actions, advantages, returns, values,
-                                             rnn_hidden_states, masks)
-        for batch in data_generator:
-            b_obs, b_rnn_hidden_states, b_actions, b_values, b_returns, b_masks, b_logprobs, b_advantages = batch
+    # flatten the batch
+    b_obs = obs.reshape((-1,)+envs.observation_space.shape)
+    b_actions = actions.reshape((-1,)+envs.action_space.shape)
+    b_returns = returns.reshape(-1)
+    b_rnn_hidden_states = rnn_hidden_states[0].reshape((-1, args.rnn_hidden_size))
+    b_masks = masks.reshape((-1, 1))
 
-            if args.norm_adv:
-                b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
+    b_values, b_rnn_hidden_state, b_actions, b_logprobs, b_entropy = agent.get_action(b_obs,
+                                                                                      b_rnn_hidden_states,
+                                                                                      masks, b_actions.long())
+    advantages = b_returns - b_values.reshape(-1)
+    v_loss = advantages.pow(2).mean()
+    pg_loss = -(advantages.detach() * b_logprobs).mean()
+    entropy_loss = b_entropy.mean()
+    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
-            _, _, newlogproba, entropy = agent.get_action(
-                b_obs,
-                b_rnn_hidden_states,
-                b_masks,
-                b_actions.long())
-            ratio = (newlogproba - b_logprobs).exp()
-
-            # Stats
-            approx_kl = (b_logprobs - newlogproba).mean()
-
-            # Policy loss
-            pg_loss1 = -b_advantages * ratio
-            pg_loss2 = -b_advantages * torch.clamp(ratio, 1-args.clip_coef, 1+args.clip_coef)
-            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-            entropy_loss = entropy.mean()
-
-            # Value loss
-            new_values = agent.get_value(b_obs, b_rnn_hidden_states, b_masks).view(-1)
-            if args.clip_vloss:
-                v_loss_unclipped = ((new_values - b_returns) ** 2)
-                v_clipped = b_values + torch.clamp(new_values - b_values, -args.clip_coef, args.clip_coef)
-                v_loss_clipped = (v_clipped - b_returns)**2
-                v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                v_loss = 0.5 * v_loss_max.mean()
-            else:
-                v_loss = 0.5 * ((new_values - b_returns) ** 2).mean()
-
-            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-            optimizer.step()
-
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
     writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-    writer.add_scalar("losses/entropy", entropy.mean().item(), global_step)
-    writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-    if args.kle_stop or args.kle_rollback:
-        writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
+    writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
 
 envs.close()
 writer.close()
