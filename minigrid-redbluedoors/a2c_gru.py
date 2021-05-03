@@ -54,9 +54,9 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-RedBlueDoors-6x6-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=0.0007,
+    parser.add_argument('--learning-rate', type=float, default=7e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -84,15 +84,15 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--num-envs', type=int, default=8,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=32,
+    parser.add_argument('--num-steps', type=int, default=16,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
     parser.add_argument('--gae-lambda', type=float, default=0.95,
                         help='the lambda for the general advantage estimation')
-    parser.add_argument('--ent-coef', type=float, default=0.001,
+    parser.add_argument('--ent-coef', type=float, default=0.01,
                         help="coefficient of the entropy")
-    parser.add_argument('--vf-coef', type=float, default=0.5,
+    parser.add_argument('--vf-coef', type=float, default=0.02,
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')

@@ -80,15 +80,15 @@ if __name__ == "__main__":
                         help='scale reward')
     parser.add_argument('--rnn-hidden-size', type=int, default=256,
                         help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=8,
+    parser.add_argument('--seq-length', type=int, default=16,
                         help='seq length')
 
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=8,
+    parser.add_argument('--num-envs', type=int, default=4,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=256,
+    parser.add_argument('--num-steps', type=int, default=32,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -330,7 +330,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
                 start_index = done_index + 1
                 # Split episodes into sequences
                 if args.seq_length > 0:
-                    for start in range(0, len(episode), args.seq_length):
+                    for start in range(0, len(episode), args.seq_length): # step min seq_length
                         end = start + args.seq_length
                         sequences.append(episode[start:end])
                         max_sequence_length = args.seq_length
@@ -498,14 +498,6 @@ for update in range(1, num_updates+1):
                     next_return = returns[t+1]
                 returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
             advantages = returns - values
-
-    # flatten the batch
-    b_obs = obs.reshape((-1,)+envs.observation_space.shape)
-    b_logprobs = logprobs.reshape(-1)
-    b_actions = actions.reshape((-1,)+envs.action_space.shape)
-    b_advantages = advantages.reshape(-1)
-    b_returns = returns.reshape(-1)
-    b_values = values.reshape(-1)
 
     nonzero = torch.nonzero(dones)
     dones_index = [[]] * dones.shape[1]
