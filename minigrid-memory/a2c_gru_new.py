@@ -48,13 +48,14 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import torch.autograd
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='A2C agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-RedBlueDoors-6x6-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=0.0007,
                         help='the learning rate of the optimizer')
@@ -238,23 +239,25 @@ class Agent(nn.Module):
 
         self.actor = layer_init(nn.Linear(rnn_hidden_size, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
+        self.train()
 
     def forward(self, x, rnn_hidden_state, mask):
         x = self.network(x)
-        if x.size(0) == rnn_hidden_state.size(0):
-            x = rnn_hidden_state = self.gru(x, rnn_hidden_state * mask)
-        else:
-            N = rnn_hidden_state.size(0)
-            T = int(x.size(0) / N)
-            x = x.view(T, N, x.size(1))
-            mask = mask.view(T, N, 1)
-            outputs = []
-            for i in range(T):
-                rnn_hidden_state = self.gru(x[i], rnn_hidden_state * mask[i])
-                outputs.append(rnn_hidden_state)
-            x = torch.stack(outputs, dim=0)
-            x = x.view(T * N, -1)
-        return x, rnn_hidden_state
+        x = self.gru(x, rnn_hidden_state*mask.clone())
+        #if x.size(0) == rnn_hidden_state.size(0):
+        #    x = rnn_hidden_state = self.gru(x, rnn_hidden_state * mask)
+        #else:
+        #    N = rnn_hidden_state.size(0)
+        #    T = int(x.size(0) / N)
+        #    x = x.view(T, N, x.size(1))
+        #    mask = mask.view(T, N, 1)
+        ##    outputs = []
+        #    for i in range(T):
+        #        rnn_hidden_state = self.gru(x[i], rnn_hidden_state * mask[i])
+        #        outputs.append(rnn_hidden_state)
+        #    x = torch.stack(outputs, dim=0)
+        #    x = x.view(T * N, -1)
+        return x, x
 
     def get_action(self, x, rnn_hidden_state, mask, action=None):
         x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
@@ -288,6 +291,8 @@ dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, args.rnn_hidden_size)).to(device)
 masks = torch.ones((args.num_steps, args.num_envs, 1)).to(device)
+logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
+entropies = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
@@ -298,90 +303,99 @@ rnn_hidden_state = torch.zeros((args.num_envs, args.rnn_hidden_size))
 next_done = torch.zeros(args.num_envs).to(device)
 mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done])
 num_updates = args.total_timesteps // args.batch_size
-for update in range(1, num_updates+1):
-    # Annealing the rate if instructed to do so.
-    if args.anneal_lr:
-        frac = 1.0 - (update - 1.0) / num_updates
-        lrnow = lr(frac)
-        optimizer.param_groups[0]['lr'] = lrnow
+with torch.autograd.detect_anomaly():
+    for update in range(1, num_updates+1):
+        # Annealing the rate if instructed to do so.
+        if args.anneal_lr:
+            frac = 1.0 - (update - 1.0) / num_updates
+            lrnow = lr(frac)
+            optimizer.param_groups[0]['lr'] = lrnow
 
-    # TRY NOT TO MODIFY: prepare the execution of the game.
-    for step in range(0, args.num_steps):
-        global_step += 1 * args.num_envs
-        obs[step] = next_obs
-        dones[step] = next_done
-        rnn_hidden_states[step] = rnn_hidden_state
-        masks[step] = mask
-        # ALGO LOGIC: put action logic here
+        # TRY NOT TO MODIFY: prepare the execution of the game.
+        for step in range(0, args.num_steps):
+            global_step += 1 * args.num_envs
+            obs[step] = next_obs
+            dones[step].copy_(next_done.to(device))
+            rnn_hidden_states[step] = rnn_hidden_state
+            masks[step].copy_(mask)
+            # ALGO LOGIC: put action logic here
+            #with torch.no_grad():
+            value, rnn_hidden_state, action, logprob, entropy = agent.get_action(obs[step], rnn_hidden_states[step], masks[step])
+
+            values[step] = value.flatten()
+            actions[step] = action
+            entropies[step] = entropy
+            logprobs[step] = logprob
+
+            # TRY NOT TO MODIFY: execute the game and log data.
+            next_obs, rs, ds, infos = envs.step(action)
+            rewards[step].copy_(rs.view(-1).to(device))
+            next_done = torch.Tensor(ds).to(device)
+            mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
+
+            for info in infos:
+                if info and 'reward' in info.keys():
+                    writer.add_scalar("charts/episode_reward", info['reward'], global_step)
+                if info and 'length' in info.keys():
+                    writer.add_scalar("charts/episode_length", info['length'], global_step)
+
+
+        # bootstrap reward if not done. reached the batch limit
         with torch.no_grad():
-            value, rnn_hidden_state, action, logproba, _ = agent.get_action(obs[step], rnn_hidden_states[step], masks[step])
+            last_value,  _, _, _, _ = agent.get_action(next_obs, rnn_hidden_state.detach(), mask)
+            last_value = last_value.reshape(1, -1)
+            if args.gae:
+                advantages = torch.zeros_like(rewards).to(device)
+                lastgaelam = 0
+                for t in reversed(range(args.num_steps)):
+                    if t == args.num_steps - 1:
+                        nextnonterminal = 1.0 - next_done
+                        nextvalues = last_value
+                    else:
+                        nextnonterminal = 1.0 - dones[t+1]
+                        nextvalues = values[t+1]
+                    delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                    advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                returns = advantages + values
+            else:
+                returns = torch.zeros_like(rewards).to(device)
+                for t in reversed(range(args.num_steps)):
+                    if t == args.num_steps - 1:
+                        nextnonterminal = 1.0 - next_done
+                        next_return = last_value
+                    else:
+                        nextnonterminal = 1.0 - dones[t+1]
+                        next_return = returns[t+1]
+                    returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
 
-        values[step] = value.flatten()
-        actions[step] = action
+        # flatten the batch
+        b_obs = obs.reshape((-1,)+envs.observation_space.shape)
+        b_actions = actions.reshape((-1,)+envs.action_space.shape)
+        b_returns = returns.reshape(-1)
+        b_rnn_hidden_states = rnn_hidden_states[0].reshape((-1, args.rnn_hidden_size))
+        b_masks = masks.reshape((-1, 1))
+        b_values = values.reshape(-1)
+        b_logprobs = logprobs.reshape(-1)
+        b_entropies = entropies.reshape(-1)
 
-        # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rs, ds, infos = envs.step(action)
-        rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-        mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
+        #b_values, b_rnn_hidden_state, b_actions, b_logprobs, b_entropy = agent.get_action(b_obs,
+        #                                                                                  b_rnn_hidden_states,
+        #                                                                                  masks[-1], b_actions.long())
+        advantages = b_returns.detach() - b_values.reshape(-1)
+        v_loss = advantages.pow(2).mean()
+        pg_loss = -(advantages.detach() * b_logprobs).mean()
+        entropy_loss = b_entropies.mean()
+        loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
-        for info in infos:
-            if info and 'reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
-            if info and 'length' in info.keys():
-                writer.add_scalar("charts/episode_length", info['length'], global_step)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-    # bootstrap reward if not done. reached the batch limit
-    with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), rnn_hidden_state, mask).reshape(1, -1)
-        if args.gae:
-            advantages = torch.zeros_like(rewards).to(device)
-            lastgaelam = 0
-            for t in reversed(range(args.num_steps)):
-                if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
-                    nextvalues = last_value
-                else:
-                    nextnonterminal = 1.0 - dones[t+1]
-                    nextvalues = values[t+1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
-            returns = advantages + values
-        else:
-            returns = torch.zeros_like(rewards).to(device)
-            for t in reversed(range(args.num_steps)):
-                if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
-                    next_return = last_value
-                else:
-                    nextnonterminal = 1.0 - dones[t+1]
-                    next_return = returns[t+1]
-                returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
-
-    # flatten the batch
-    b_obs = obs.reshape((-1,)+envs.observation_space.shape)
-    b_actions = actions.reshape((-1,)+envs.action_space.shape)
-    b_returns = returns.reshape(-1)
-    b_rnn_hidden_states = rnn_hidden_states[0].reshape((-1, args.rnn_hidden_size))
-    b_masks = masks.reshape((-1, 1))
-
-    b_values, b_rnn_hidden_state, b_actions, b_logprobs, b_entropy = agent.get_action(b_obs,
-                                                                                      b_rnn_hidden_states,
-                                                                                      masks, b_actions.long())
-    advantages = b_returns - b_values.reshape(-1)
-    v_loss = advantages.pow(2).mean()
-    pg_loss = -(advantages.detach() * b_logprobs).mean()
-    entropy_loss = b_entropy.mean()
-    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    # TRY NOT TO MODIFY: record rewards for plotting purposes
-    writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
-    writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-    writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-    writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
+        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
 
 envs.close()
 writer.close()
