@@ -117,7 +117,7 @@ if __name__ == "__main__":
                         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
-    parser.add_argument('--rnn-hidden-size', type=int, default=256,
+    parser.add_argument('--rnn-hidden-size', type=int, default=32,
                         help='rnn hidden size')
 
     args = parser.parse_args()
@@ -126,6 +126,74 @@ if __name__ == "__main__":
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
+
+
+class SimpleMemoryTask:
+    def __init__(self):
+        self.action_space = spaces.Discrete(2)
+        self._step_size = 0.2
+        self._min_steps = int(1.0 / self._step_size) + 1
+        self._time_penalty = 0.1
+        self._num_show_steps = 2    # this should determine for how long the goal is visible
+        self.observation_space = (3,)
+
+    def reset(self):
+        self._rewards = []
+        self._position = 0.0
+        self._step_count = 0
+        goals = np.asarray([-1.0, 1.0])
+        self._goals = goals[np.random.permutation(2)]
+        vec_obs = np.asarray([self._goals[0], self._position, self._goals[1]])
+        return vec_obs
+
+    def step(self, action):
+        # Execute action
+        self._position += self._step_size if action == 1 else -self._step_size
+        # Create vector observation
+        if self._num_show_steps > self._step_count:
+            vec_obs = np.asarray([self._goals[0], self._position, self._goals[1]])
+        else:
+            vec_obs = np.asarray([0.0, self._position, 0.0]) # mask out goal information
+
+        # Determine reward and episode termination
+        reward = 0.0
+        done = False
+        if self._position == -1.0:
+            if self._goals[0] == 1.0:
+                reward += 1.0 + self._min_steps * self._time_penalty
+            else:
+                reward -= 1.0 + self._min_steps * self._time_penalty
+            done = True
+        elif self._position == 1.0:
+            if self._goals[1] == 1.0:
+                reward += 1.0 + self._min_steps * self._time_penalty
+            else:
+                reward -= 1.0 + self._min_steps * self._time_penalty
+            done = True
+        else:
+            reward -= self._time_penalty
+        self._rewards.append(reward)
+
+        # Wrap up episode information
+        if done:
+            info = {"reward": sum(self._rewards),
+                    "length": len(self._rewards)}
+        else:
+            info = None
+
+        # Increase step count
+        self._step_count += 1
+
+        if done:
+            vec_obs = self.reset()
+
+        return vec_obs, reward, done, info
+
+    def close(self):
+        pass
+
+
+
 
 class InfoWrapper(gym.Wrapper):
     def __init__(self, env):
@@ -208,6 +276,7 @@ def make_env(seed):
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
+        env = SimpleMemoryTask()
         return env
     return thunk
 
@@ -285,13 +354,8 @@ class Agent(nn.Module):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             # Scale(1/255),
-            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(980, 256)),
-            nn.ReLU()
+            nn.Linear(3, args.rnn_hidden_size),
+            nn.ReLU(True)
         )
 
         self.lstm = nn.LSTM(args.rnn_hidden_size, args.rnn_hidden_size)
@@ -301,8 +365,8 @@ class Agent(nn.Module):
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
 
-        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+        self.actor = layer_init(nn.Linear(32, 2), std=0.01)
+        self.critic = layer_init(nn.Linear(32, 1), std=1)
 
     def forward(self, x, hxs, mask):
         x = self.network(x)
@@ -364,8 +428,8 @@ if args.anneal_lr:
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
-obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
+obs = torch.zeros((args.num_steps, args.num_envs) + (3,)).to(device)
+actions = torch.zeros((args.num_steps, args.num_envs)).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -413,6 +477,7 @@ for update in range(1, num_updates+1):
 
         for info in infos:
             if info and 'reward' in info.keys():
+                print(info['reward'])
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
             if info and 'length' in info.keys():
                 writer.add_scalar("charts/episode_length", info['length'], global_step)
