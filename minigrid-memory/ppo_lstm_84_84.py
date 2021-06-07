@@ -59,7 +59,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=9e-4,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=8,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=8,
+    parser.add_argument('--num-envs', type=int, default=16,
                         help='the number of parallel game environment')
     parser.add_argument('--num-steps', type=int, default=128,
                         help='the number of steps per game environment')
@@ -134,14 +134,15 @@ class InfoWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
+        vis_obs = self.env.get_obs_render(obs["image"], tile_size=12) / 255.
         self._rewards = []
-        return obs["image"]
+        return vis_obs
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self._rewards.append(reward)
         ## Retrieve the RGB frame of the agent's vision
-        vis_obs = obs["image"]
+        vis_obs = self.env.get_obs_render(obs["image"], tile_size=12) / 255.
 
         ## Render the environment in realtime
         #if self._realtime_mode:
@@ -159,10 +160,24 @@ class InfoWrapper(gym.Wrapper):
 class WarpFrame(gym.ObservationWrapper):
     def __init__(self, env, width=84, height=84):
         super().__init__(env)
-        self.observation_space = env.observation_space.spaces['image']
+        self._width = width
+        self._height = height
+        num_colors = 3
+        new_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(self._height, self._width, num_colors),
+            dtype=np.uint8,
+        )
+        self.observation_space = new_space
+        original_space = self.observation_space
+        self.observation_space = new_space
+        assert original_space.dtype == np.uint8 and len(original_space.shape) == 3
 
     def observation(self, obs):
-        return obs
+        frame = obs
+        frame = cv2.resize(frame, (self._width, self._height), interpolation=cv2.INTER_AREA)
+        return frame
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -203,6 +218,7 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
         env = gym.make(args.gym_id)
+        env = ViewSizeWrapper(env, 3)
         env = InfoWrapper(env)
         env = WarpFrame(env)
         env = wrap_pytorch(env)
@@ -249,25 +265,37 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3, rnn_input_size=256, rnn_hidden_size=256):
+    def __init__(self, envs, channels=3, rnn_input_size=256, rnn_hidden_size=256):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            # Scale(1/255),
-            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
+            #Scale(1/255),
+            layer_init(nn.Conv2d(in_channels=channels,
+                                 out_channels=32,
+                                 kernel_size=8,
+                                 stride=4,
+                                 padding=0)),
             nn.LeakyReLU(),
-            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            layer_init(nn.Conv2d(in_channels=32,
+                                 out_channels=64,
+                                 kernel_size=4,
+                                 stride=2,
+                                 padding=0)),
             nn.LeakyReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(980, rnn_input_size))
-        )
+            layer_init(nn.Conv2d(in_channels=64,
+                                 out_channels=64,
+                                 kernel_size=3,
+                                 stride=1,
+                                 padding=0)),
+            nn.LeakyReLU(),
+            nn.Flatten())
 
-        self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size, batch_first=True)
+        self.rnn = nn.LSTM(3136, rnn_hidden_size, batch_first=True)
         for name, param in self.rnn.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
-        self.actor = layer_init(nn.Linear(rnn_hidden_size, 3), std=0.01)
+        self.actor = layer_init(nn.Linear(rnn_hidden_size, 3), std=np.sqrt(0.01))
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
     def forward(self, x, rnn_state, sequence_length=1):
@@ -278,7 +306,7 @@ class Agent(nn.Module):
         else:
             x_shape = tuple(x.size())
             x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
-            x, rnn_state = self.rnn(x, rnn_state)
+            x, (rnn_state) = self.rnn(x, rnn_state)
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
         return x, rnn_state
@@ -363,8 +391,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
 
     #generator
     num_sequences_per_batch = num_sequences // args.n_minibatch
-    num_sequences_per_batch = [
-                                  num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
+    num_sequences_per_batch = [num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
     remainder = num_sequences % args.n_minibatch
     for i in range(remainder):
         num_sequences_per_batch[i] += 1
@@ -504,14 +531,16 @@ for update in range(1, num_updates+1):
                                              rnn_hidden_states, rnn_cell_states)
         for batch in data_generator:
             b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
-                                                                                                                      batch['values'], batch['returns'], \
-                                                                                                                      batch['log_probs'], batch['advantages'], \
-                                                                                                                      batch["hxs"], batch["cxs"], batch["loss_mask"]
+                                                                                                                                   batch['values'], batch['returns'], \
+                                                                                                                                   batch['log_probs'], batch['advantages'], \
+                                                                                                                                   batch["hxs"], batch["cxs"], batch["loss_mask"]
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
-                                                                     sequence_length=args.seq_length, action=b_actions.long())
+            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0),
+                                                                             b_rnn_cell_states.unsqueeze(0)),
+                                                                     sequence_length=args.seq_length,
+                                                                     action=b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 
             # Stats
@@ -525,15 +554,15 @@ for update in range(1, num_updates+1):
             entropy_loss = masked_mean(entropy, b_loss_mask)
 
             # Value loss
-            new_values = newvalues.view(-1)
+            newvalues = newvalues.view(-1)
             if args.clip_vloss:
-                v_loss_unclipped = ((new_values - b_returns) ** 2)
-                v_clipped = b_values + torch.clamp(new_values - b_values, -args.clip_coef, args.clip_coef)
+                v_loss_unclipped = ((newvalues - b_returns) ** 2)
+                v_clipped = b_values + torch.clamp(newvalues - b_values, -args.clip_coef, args.clip_coef)
                 v_loss_clipped = (v_clipped - b_returns)**2
                 v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                 v_loss = 0.5 * masked_mean(v_loss_max, b_loss_mask)
             else:
-                v_loss = 0.5 * ((new_values - b_returns) ** 2).mean()
+                v_loss = 0.5 * ((newvalues - b_returns) ** 2).mean()
 
             loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 

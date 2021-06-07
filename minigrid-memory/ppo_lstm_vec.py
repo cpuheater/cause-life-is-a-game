@@ -52,6 +52,202 @@ import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 
+
+import time
+import numpy as np
+import gym_minigrid
+import gym
+from gym import error, spaces
+from random import randint
+from gym_minigrid.wrappers import ViewSizeWrapper
+
+class MinigridVecWrapper():
+    """This class wraps Gym Minigrid environments.
+    https://github.com/maximecb/gym-minigrid
+    """
+
+    def __init__(self, env_name, reset_params = None, realtime_mode = False, record_trajectory = False):
+        """Instantiates the Minigrid environment.
+
+        Arguments:
+            env_name {string} -- Name of the Minigrid environment
+            reset_params {dict} -- Provides parameters, like a seed, to configure the environment. (default: {None})
+            realtime_mode {bool} -- Whether to render the environment in realtime. (default: {False})
+            record_trajectory {bool} -- Whether to record the trajectory of an entire episode. This can be used for video recording. (default: {False})
+        """
+        # Set default reset parameters if none were provided
+        if reset_params is None:
+            self._default_reset_params = {"start-seed": 0, "num-seeds": 100}
+        else:
+            self._default_reset_params = reset_params
+
+        self._env = gym.make(env_name)
+        self.agent_view_size = 3
+        self._env = ViewSizeWrapper(self._env, self.agent_view_size)
+
+        self._realtime_mode = realtime_mode
+        self._record = record_trajectory
+
+        # Prepare observation space
+        self._vector_observation_space = (self.agent_view_size**2*5,)
+        self.reward_range = 2
+        self.metadata = {}
+
+    @property
+    def unwrapped(self):
+        """Return this environment in its vanilla (i.e. unwrapped) state."""
+        return self
+
+    @property
+    def visual_observation_space(self):
+        """Returns the shape of the visual component of the observation space as a tuple."""
+        return None
+
+    @property
+    def vector_observation_space(self):
+        """Returns the shape of the vector component of the observation space as a tuple."""
+        return self._vector_observation_space
+
+    @property
+    def observation_space(self):
+        """Returns the shape of the vector component of the observation space as a tuple."""
+        return self._vector_observation_space
+
+    @property
+    def observation_space(self):
+        """Returns the shape of the vector component of the observation space as a tuple."""
+        return self._env.reward_range
+
+
+    @property
+    def action_space(self):
+        """Returns the shape of the action space of the agent."""
+        return spaces.Discrete(3)
+        # return self._env.action_space
+
+    @property
+    def action_names(self):
+        """Returns a list of action names."""
+        return [["left", "right", "forward"]]
+        # return [["left", "right", "forward", "toggle", "pickup", "drop", "done"]]
+
+    @property
+    def get_episode_trajectory(self):
+        """Returns the trajectory of an entire episode as dictionary (vis_obs, vec_obs, rewards, actions).
+        """
+        self._trajectory["action_names"] = self.action_names
+        return self._trajectory if self._trajectory else None
+
+    def reset(self, reset_params = None):
+        """Resets the environment.
+
+        Keyword Arguments:
+            reset_params {dict} -- Provides parameters, like a seed, to configure the environment. (default: {None})
+
+        Returns:
+            {numpy.ndarray} -- Visual observation
+            {numpy.ndarray} -- Vector observation
+        """
+        # Set default reset parameters if none were provided
+        if reset_params is None:
+            reset_params = self._default_reset_params
+        else:
+            reset_params = reset_params
+        # Set seed
+        self._env.seed(randint(reset_params["start-seed"], reset_params["start-seed"] + reset_params["num-seeds"] - 1))
+        # Track rewards of an entire episode
+        self._rewards = []
+        # Reset the environment and retrieve the initial observation
+        obs = self._env.reset()
+        # Retrieve the RGB frame of the agent"s vision
+        # vis_obs = self._env.get_obs_render(obs["image"], tile_size=12)
+        # vis_obs = vis_obs.astype(np.float32) / 255.
+
+        # Vector observation
+        vec_obs = self.process_obs(obs["image"])
+
+        # Render environment?
+        if self._realtime_mode:
+            self._env.render(tile_size = 96)
+
+        # Prepare trajectory recording
+        self._trajectory = {
+            "vis_obs": [self._env.render(tile_size = 96, mode = "rgb_array").astype(np.uint8)], "vec_obs": [vec_obs],
+            "rewards": [0.0], "frame_rate": 1
+        }
+
+        # import matplotlib.pyplot as plt
+        # plt.imshow(self._env.render(tile_size = 96, mode = "rgb_array").astype(np.uint8))
+        # plt.show()
+
+        return None, vec_obs
+
+    def step(self, action):
+        """Runs one timestep of the environment's dynamics.
+
+        Arguments:
+            action {int} -- The to be executed action
+
+        Returns:
+            {numpy.ndarray} -- Visual observation
+            {numpy.ndarray} -- Vector observation
+            {float} -- (Total) Scalar reward signaled by the environment
+            {bool} -- Whether the episode of the environment terminated
+            {dict} -- Further episode information (e.g. cumulated reward) retrieved from the environment once an episode completed
+        """
+        obs, reward, done, info = self._env.step(action[0])
+        self._rewards.append(reward)
+        # Retrieve the RGB frame of the agent's vision
+        # vis_obs = self._env.get_obs_render(obs["image"], tile_size=12)  / 255.
+        # Vector observation
+        vec_obs = self.process_obs(obs["image"])
+
+        # Render the environment in realtime
+        if self._realtime_mode:
+            self._env.render(tile_size = 96)
+            time.sleep(0.5)
+
+        # Record trajectory data
+        if self._record:
+            self._trajectory["vis_obs"].append(self._env.render(tile_size = 96, mode="rgb_array").astype(np.uint8))
+            self._trajectory["vec_obs"].append(None)
+            self._trajectory["rewards"].append(reward)
+
+        # Wrap up episode information once completed (i.e. done)
+        if done:
+            info = {"reward": sum(self._rewards),
+                    "length": len(self._rewards)}
+        else:
+            info = None
+
+        return None, vec_obs, reward, done, info
+
+    def close(self):
+        """Shuts down the environment."""
+        self._env.close()
+
+    def process_obs(self, obs):
+        one_hot_obs = []
+        for i in range(obs.shape[0]):
+            for j in range(obs.shape[1]):
+                # print(obs[i,j,0])
+                # if i == 1 and j == 2:
+                #     one_hot_obs.append([1, 0, 0, 0, 0]) # agent tile
+                # else:
+                if obs[i,j,0] == 1:
+                    one_hot_obs.append([0, 1, 0, 0, 0]) # walkable tile
+                elif obs[i,j,0] == 2:
+                    one_hot_obs.append([0, 0, 1, 0, 0]) # blocked tile
+                elif obs[i,j,0] == 5:
+                    one_hot_obs.append([0, 0, 0, 1, 0]) # key tile
+                elif obs[i,j,0] == 6:
+                    one_hot_obs.append([0, 0, 0, 0, 1]) # circle tile
+                else:
+                    one_hot_obs.append([0, 0, 0, 0, 0]) # anything else
+        # return flattened one-hot encoded observation
+        return np.asarray(one_hot_obs, dtype=np.float32).reshape(-1)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
@@ -59,7 +255,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=9e-4,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -87,7 +283,7 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=8,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=8,
+    parser.add_argument('--num-envs', type=int, default=16,
                         help='the number of parallel game environment')
     parser.add_argument('--num-steps', type=int, default=128,
                         help='the number of steps per game environment')
@@ -202,7 +398,7 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
-        env = gym.make(args.gym_id)
+        env = MinigridVecWrapper(args.gym_id)
         env = InfoWrapper(env)
         env = WarpFrame(env)
         env = wrap_pytorch(env)
@@ -254,14 +450,15 @@ class Agent(nn.Module):
         self.network = nn.Sequential(
             # Scale(1/255),
             layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
-            nn.LeakyReLU(),
+            nn.ReLU(),
             layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
-            nn.LeakyReLU(),
+            nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(980, rnn_input_size))
+            layer_init(nn.Linear(980, 3*rnn_input_size)),
+            nn.ReLU()
         )
 
-        self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size, batch_first=True)
+        self.rnn = nn.LSTM(3*rnn_input_size, rnn_hidden_size, batch_first=True)
         for name, param in self.rnn.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)
@@ -270,30 +467,30 @@ class Agent(nn.Module):
         self.actor = layer_init(nn.Linear(rnn_hidden_size, 3), std=0.01)
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
-    def forward(self, x, rnn_state, sequence_length=1):
+    def forward(self, x, rnn_hidden_state, rnn_cell_state, sequence_length=1):
         x = self.network(x)
         if sequence_length == 1:
-            x, rnn_state = self.rnn(x.unsqueeze(1), rnn_state)
+            x, (rnn_hidden_state, rnn_cell_state) = self.rnn(x.unsqueeze(1), (rnn_hidden_state, rnn_cell_state))
             x = x.squeeze(1)
         else:
             x_shape = tuple(x.size())
             x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
-            x, rnn_state = self.rnn(x, rnn_state)
+            x, (rnn_hidden_state, rnn_cell_state) = self.rnn(x, (rnn_hidden_state.unsqueeze(0), rnn_cell_state.unsqueeze(0)))
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
-        return x, rnn_state
+        return x, (rnn_hidden_state, rnn_cell_state)
 
-    def get_action(self, x, rnn_state, sequence_length=1, action=None):
-        x, rnn_state = self.forward(x, rnn_state, sequence_length)
+    def get_action(self, x, rnn_hidden_state, rnn_cell_state, sequence_length=1, action=None):
+        x, (rnn_hidden_state, rnn_cell_state) = self.forward(x, rnn_hidden_state, rnn_cell_state, sequence_length)
         value = self.critic(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return value, rnn_state, action, probs.log_prob(action), probs.entropy()
+        return value, (rnn_cell_state, rnn_hidden_state), action, probs.log_prob(action), probs.entropy()
 
-    def get_value(self, x, rnn_state):
-        x, _ = self.forward(x, rnn_state)
+    def get_value(self, x, rnn_hidden_state, rnn_cell_state):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, rnn_cell_state)
         return self.critic(x)
 
 def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states):
@@ -450,7 +647,7 @@ for update in range(1, num_updates+1):
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state))
+            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], rnn_hidden_state, rnn_cell_state)
 
         values[step] = value.flatten()
         actions[step] = action
@@ -472,7 +669,7 @@ for update in range(1, num_updates+1):
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), rnn_hidden_state, rnn_cell_state).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -504,14 +701,13 @@ for update in range(1, num_updates+1):
                                              rnn_hidden_states, rnn_cell_states)
         for batch in data_generator:
             b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
-                                                                                                                      batch['values'], batch['returns'], \
-                                                                                                                      batch['log_probs'], batch['advantages'], \
-                                                                                                                      batch["hxs"], batch["cxs"], batch["loss_mask"]
+                                                                                                                                   batch['values'], batch['returns'], \
+                                                                                                                                   batch['log_probs'], batch['advantages'], \
+                                                                                                                                   batch["hxs"], batch["cxs"], batch["loss_mask"]
             if args.norm_adv:
-                b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
+                mb_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
-                                                                     sequence_length=args.seq_length, action=b_actions.long())
+            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, b_rnn_hidden_states, b_rnn_cell_states, sequence_length=args.seq_length, action=b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 
             # Stats
