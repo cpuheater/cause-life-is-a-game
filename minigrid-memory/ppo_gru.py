@@ -504,9 +504,9 @@ for update in range(1, num_updates+1):
                                              rnn_hidden_states, rnn_cell_states)
         for batch in data_generator:
             b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
-                                                                                                                      batch['values'], batch['returns'], \
-                                                                                                                      batch['log_probs'], batch['advantages'], \
-                                                                                                                      batch["hxs"], batch["cxs"], batch["loss_mask"]
+                                                                                                                                   batch['values'], batch['returns'], \
+                                                                                                                                   batch['log_probs'], batch['advantages'], \
+                                                                                                                                   batch["hxs"], batch["cxs"], batch["loss_mask"]
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
