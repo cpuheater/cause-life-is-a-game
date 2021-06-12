@@ -26,7 +26,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="workerRushAI-reward-shaping-10.0-0.1-0.1-0.02-0.1-0.4",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=6.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=6e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -192,7 +192,7 @@ envs = MicroRTSVecEnv(
     max_steps=20000,
     render_theme=2,
     ai2s=[microrts_ai.workerRushAI for _ in range(args.num_envs)],
-    map_path="maps/10x10/basesWorkers10x10.xml",
+    map_path="maps/8x8/basesWorkers8x8.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
@@ -276,7 +276,7 @@ class ConvSequence(nn.Module):
 class ImpalaCNN(nn.Module):
     def __init__(self):
         super(ImpalaCNN, self).__init__()
-        h, w, c = 10, 10, 27
+        h, w, c = 8, 8, 27
         shape = (c, h, w)
 
         conv_seqs = []
@@ -318,7 +318,7 @@ class Agent(nn.Module):
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
         split_logits = torch.split(logits, envs.action_space.nvec.tolist(), dim=1)
-        print(envs.action_space.nvec.tolist())
+        #print(envs.action_space.nvec.tolist())
         if action is None:
             # 1. select source unit based on source unit mask
             source_unit_mask = torch.Tensor(np.array(envs.vec_client.getUnitLocationMasks()).reshape(args.num_envs, -1))

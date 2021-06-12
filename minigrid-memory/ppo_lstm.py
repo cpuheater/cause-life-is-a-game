@@ -462,10 +462,10 @@ for update in range(1, num_updates+1):
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
         rnn_hidden_state = rnn_hidden_state * mask
         rnn_cell_state = rnn_cell_state * mask
+        indices = torch.nonzero(next_done).flatten().tolist()
+        [episode_done_indices[index].append(step) for index in indices]
         for info in infos:
             if info and 'reward' in info.keys():
-                index = torch.nonzero(next_done)[0].item()
-                episode_done_indices[index].append(step)
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
             if info and 'length' in info.keys():
                 writer.add_scalar("charts/episode_length", info['length'], global_step)

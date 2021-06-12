@@ -1,3 +1,5 @@
+# http://proceedings.mlr.press/v97/han19a/han19a.pdf
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,7 +13,7 @@ import numpy as np
 import gym
 import gym_microrts
 from gym.wrappers import TimeLimit, Monitor
-from gym_microrts.envs.vec_env import MicroRTSVecEnv
+from gym_microrts.envs.vec_env import MicroRTSGridModeVecEnv
 from gym_microrts import microrts_ai
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
@@ -24,13 +26,13 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="workerRushAI-reward-shaping-10.0-0.1-0.1-0.02-0.1-0.4",
+    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=6.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=6e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=40000000,
+    parser.add_argument('--total-timesteps', type=int, default=50000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -40,7 +42,7 @@ if __name__ == "__main__":
                         help='run the script in production mode and use wandb to log outputs')
     parser.add_argument('--capture-video', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
-    parser.add_argument('--wandb-project-name', type=str, default="microrts",
+    parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
@@ -48,9 +50,11 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=16,
-                        help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=512,
+    parser.add_argument('--num-bot-envs', type=int, default=24,
+                        help='the number of bot game environment; 16 bot envs measn 16 games')
+    parser.add_argument('--num-selfplay-envs', type=int, default=0,
+                        help='the number of self play envs; 16 self play envs means 8 games')
+    parser.add_argument('--num-steps', type=int, default=256,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -84,9 +88,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
-
+args.num_envs = args.num_selfplay_envs + args.num_bot_envs
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
+
 
 class VecMonitor(VecEnvWrapper):
     def __init__(self, venv):
@@ -121,25 +126,6 @@ class VecMonitor(VecEnvWrapper):
                 newinfos[i] = info
         return obs, rews, dones, newinfos
 
-class VecPyTorch(VecEnvWrapper):
-    def __init__(self, venv, device):
-        super(VecPyTorch, self).__init__(venv)
-        self.device = device
-
-    def reset(self):
-        obs = self.venv.reset()
-        obs = torch.from_numpy(obs).float().to(self.device)
-        return obs
-
-    def step_async(self, actions):
-        actions = actions.cpu().numpy()
-        self.venv.step_async(actions)
-
-    def step_wait(self):
-        obs, reward, done, info = self.venv.step_wait()
-        obs = torch.from_numpy(obs).float().to(self.device)
-        reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
-        return obs, reward, done, info
 
 class MicroRTSStatsRecorder(VecEnvWrapper):
     def __init__(self, env, gamma):
@@ -166,13 +152,15 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
                 newinfos[i] = info
         return obs, rews, dones, newinfos
 
+
 # TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__" + time.strftime("%d-%m-%Y_%H-%M-%S")
+experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
     '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
+
     run = wandb.init(
         project=args.wandb_project_name, entity=args.wandb_entity,
         # sync_tensorboard=True,
@@ -186,32 +174,37 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-
-envs = MicroRTSVecEnv(
-    num_envs=args.num_envs,
-    max_steps=20000,
+envs = MicroRTSGridModeVecEnv(
+    num_selfplay_envs=args.num_selfplay_envs,
+    num_bot_envs=args.num_bot_envs,
+    max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_envs)],
-    map_path="maps/10x10/basesWorkers10x10.xml",
+    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
+    map_path="maps/8x8/basesWorkers8x8.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
-envs = VecPyTorch(envs, device)
 if args.capture_video:
     envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x: x % 1000000 == 0, video_length=2000)
+# if args.prod_mode:
+#     envs = VecPyTorch(
+#         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
+#         device
+#     )
 assert isinstance(envs.action_space, MultiDiscrete), "only MultiDiscrete action space is supported"
+
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
-    def __init__(self, probs=None, logits=None, validate_args=None, masks=[]):
+    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
         self.masks = masks
         if len(self.masks) == 0:
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
         else:
-            self.masks = masks.type(torch.BoolTensor).to(device)
-            logits = torch.where(self.masks, logits, torch.tensor(-1e+8).to(device))
+            self.masks = masks.bool()
+            logits = torch.where(self.masks, logits, torch.tensor(-1e+8, device=device))
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
 
     def entropy(self):
@@ -231,118 +224,67 @@ class Scale(nn.Module):
         return x * self.scale
 
 
+class Transpose(nn.Module):
+    def __init__(self, permutation):
+        super().__init__()
+        self.permutation = permutation
+
+    def forward(self, x):
+        return x.permute(self.permutation)
+
+
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class ResidualBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv0 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
-        self.conv1 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
-
-    def forward(self, x):
-        inputs = x
-        x = nn.functional.relu(x)
-        x = self.conv0(x)
-        x = nn.functional.relu(x)
-        x = self.conv1(x)
-        return x + inputs
-
-class ConvSequence(nn.Module):
-    def __init__(self, input_shape, out_channels):
-        super().__init__()
-        self._input_shape = input_shape
-        self._out_channels = out_channels
-        self.conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3,
-                              padding=1)
-        self.res_block0 = ResidualBlock(self._out_channels)
-        self.res_block1 = ResidualBlock(self._out_channels)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
-        x = self.res_block0(x)
-        x = self.res_block1(x)
-        assert x.shape[1:] == self.get_output_shape()
-        return x
-
-    def get_output_shape(self):
-        _c, h, w = self._input_shape
-        return (self._out_channels, (h + 1) // 2, (w + 1) // 2)
-
-
-class ImpalaCNN(nn.Module):
-    def __init__(self):
-        super(ImpalaCNN, self).__init__()
-        h, w, c = 10, 10, 27
-        shape = (c, h, w)
-
-        conv_seqs = []
-        for out_channels in [16, 32, 32]:
-            conv_seq = ConvSequence(shape, out_channels)
-            shape = conv_seq.get_output_shape()
-            conv_seqs.append(conv_seq)
-        self.conv_seqs = nn.ModuleList(conv_seqs)
-        self.hidden_fc = nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=256)
-        self.output_dim = 256
-        #self.logits_fc = nn.Linear(in_features=256, out_features=num_outputs)
-        #self.value_fc = nn.Linear(in_features=256, out_features=1)
-
-    def forward(self, input):
-        x = input.float()
-        #x = x / 255.0  # scale to 0-1
-        #x = x.permute(0, 3, 1, 2)  # NHWC => NCHW
-        for conv_seq in self.conv_seqs:
-            x = conv_seq(x)
-        x = torch.flatten(x, start_dim=1)
-        x = nn.functional.relu(x)
-        x = self.hidden_fc(x)
-        x = nn.functional.relu(x)
-        #logits = self.logits_fc(x)
-        #value = self.value_fc(x)
-        #@self._value = value.squeeze(1)
-        return x
 
 class Agent(nn.Module):
-    def __init__(self, frames=4):
+    def __init__(self, mapsize=8 * 8):
         super(Agent, self).__init__()
-        self.network = ImpalaCNN()
-        self.actor = layer_init(nn.Linear(self.network.output_dim, envs.action_space.nvec.sum()), std=0.01)
-        self.critic = layer_init(nn.Linear(self.network.output_dim, 1), std=1)
+        self.mapsize = mapsize
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(), )
+        self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
+        self.critic = layer_init(nn.Linear(128, 1), std=1)
 
     def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))
+        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
-        split_logits = torch.split(logits, envs.action_space.nvec.tolist(), dim=1)
-        print(envs.action_space.nvec.tolist())
+        grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
+        split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
+
         if action is None:
-            # 1. select source unit based on source unit mask
-            source_unit_mask = torch.Tensor(np.array(envs.vec_client.getUnitLocationMasks()).reshape(args.num_envs, -1))
-            multi_categoricals = [CategoricalMasked(logits=split_logits[0], masks=source_unit_mask)]
-            action_components = [multi_categoricals[0].sample()]
-            # 2. select action type and parameter section based on the
-            #    source-unit mask of action type and parameters
-            # print(np.array(envs.vec_client.getUnitActionMasks(action_components[0].cpu().numpy())).reshape(args.num_envs, -1))
-            source_unit_action_mask = torch.Tensor(
-                np.array(envs.vec_client.getUnitActionMasks(action_components[0].cpu().numpy())).reshape(args.num_envs,
-                                                                                                         -1))
-            split_suam = torch.split(source_unit_action_mask, envs.action_space.nvec.tolist()[1:], dim=1)
-            multi_categoricals = multi_categoricals + [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
-                                                       zip(split_logits[1:], split_suam)]
-            invalid_action_masks = torch.cat((source_unit_mask, source_unit_action_mask), 1)
-            action_components += [categorical.sample() for categorical in multi_categoricals[1:]]
-            action = torch.stack(action_components)
+            invalid_action_masks = torch.tensor(np.array(envs.vec_client.getMasks(0))).to(device)
+            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
+            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
+                                                     dim=1)
+            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
+                                  zip(split_logits, split_invalid_action_masks)]
+            action = torch.stack([categorical.sample() for categorical in multi_categoricals])
         else:
-            split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_space.nvec.tolist(), dim=1)
+            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
+            action = action.view(-1, action.shape[-1]).T
+            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
+                                                     dim=1)
             multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
                                   zip(split_logits, split_invalid_action_masks)]
         logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
         entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
-        return action, logprob.sum(0), entropy.sum(0), invalid_action_masks
+        num_predicted_parameters = len(envs.action_space.nvec) - 1
+        logprob = logprob.T.view(-1, 64, num_predicted_parameters)
+        entropy = entropy.T.view(-1, 64, num_predicted_parameters)
+        action = action.T.view(-1, 64, num_predicted_parameters)
+        invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
+        return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
 
     def get_value(self, x):
         return self.critic(self.forward(x))
@@ -355,23 +297,30 @@ if args.anneal_lr:
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
+mapsize = 8 * 8
+action_space_shape = (mapsize, envs.action_space.shape[0] - 1)
+invalid_action_shape = (mapsize, envs.action_space.nvec[1:].sum() + 1)
+
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
+actions = torch.zeros((args.num_steps, args.num_envs) + action_space_shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + (envs.action_space.nvec.sum(),)).to(device)
+invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + invalid_action_shape).to(device)
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 start_time = time.time()
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
-next_obs = envs.reset()
+next_obs = torch.Tensor(envs.reset()).to(device)
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
+
 ## CRASH AND RESUME LOGIC:
 starting_update = 1
+from jpype.types import JArray, JInt
+
 if args.prod_mode and wandb.run.resumed:
     print("previous run.summary", run.summary)
     starting_update = run.summary['charts/update'] + 1
@@ -383,6 +332,7 @@ if args.prod_mode and wandb.run.resumed:
     agent.load_state_dict(torch.load(f"models/{experiment_name}/agent.pt"))
     agent.eval()
     print(f"resumed at update {starting_update}")
+
 for update in range(starting_update, num_updates + 1):
     # Annealing the rate if instructed to do so.
     if args.anneal_lr:
@@ -396,18 +346,45 @@ for update in range(starting_update, num_updates + 1):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
-
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
             values[step] = agent.get_value(obs[step]).flatten()
             action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], envs=envs)
 
-        actions[step] = action.T
+        actions[step] = action
         logprobs[step] = logproba
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rs, ds, infos = envs.step(action.T)
-        rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
+        # the real action adds the source units
+        real_action = torch.cat([
+            torch.stack(
+                [torch.arange(0, mapsize, device=device) for i in range(envs.num_envs)
+                 ]).unsqueeze(2), action], 2)
+
+        # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
+        # so as to predict an action for each cell in the map; this obviously include a
+        # lot of invalid actions at cells for which no source units exist, so the rest of
+        # the code removes these invalid actions to speed things up
+        real_action = real_action.cpu().numpy()
+        valid_actions = real_action[invalid_action_masks[step][:, :, 0].bool().cpu().numpy()]
+        valid_actions_counts = invalid_action_masks[step][:, :, 0].sum(1).long().cpu().numpy()
+        java_valid_actions = []
+        valid_action_idx = 0
+        for env_idx, valid_action_count in enumerate(valid_actions_counts):
+            java_valid_action = []
+            for c in range(valid_action_count):
+                java_valid_action += [JArray(JInt)(valid_actions[valid_action_idx])]
+                valid_action_idx += 1
+            java_valid_actions += [JArray(JArray(JInt))(java_valid_action)]
+        java_valid_actions = JArray(JArray(JArray(JInt)))(java_valid_actions)
+
+        try:
+            next_obs, rs, ds, infos = envs.step(java_valid_actions)
+            next_obs = torch.Tensor(next_obs).to(device)
+        except Exception as e:
+            e.printStackTrace()
+            raise
+        rewards[step], next_done = torch.Tensor(rs).to(device), torch.Tensor(ds).to(device)
 
         for info in infos:
             if 'episode' in info.keys():
@@ -448,28 +425,26 @@ for update in range(starting_update, num_updates + 1):
     # flatten the batch
     b_obs = obs.reshape((-1,) + envs.observation_space.shape)
     b_logprobs = logprobs.reshape(-1)
-    b_actions = actions.reshape((-1,) + envs.action_space.shape)
+    b_actions = actions.reshape((-1,) + action_space_shape)
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
-    b_invalid_action_masks = invalid_action_masks.reshape((-1, invalid_action_masks.shape[-1]))
+    b_invalid_action_masks = invalid_action_masks.reshape((-1,) + invalid_action_shape)
 
     # Optimizaing the policy and value network
-    target_agent = Agent().to(device)
     inds = np.arange(args.batch_size, )
     for i_epoch_pi in range(args.update_epochs):
         np.random.shuffle(inds)
-        target_agent.load_state_dict(agent.state_dict())
         for start in range(0, args.batch_size, args.minibatch_size):
             end = start + args.minibatch_size
             minibatch_ind = inds[start:end]
             mb_advantages = b_advantages[minibatch_ind]
             if args.norm_adv:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-
+            # raise
             _, newlogproba, entropy, _ = agent.get_action(
                 b_obs[minibatch_ind],
-                b_actions.long()[minibatch_ind].T,
+                b_actions.long()[minibatch_ind],
                 b_invalid_action_masks[minibatch_ind],
                 envs)
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
@@ -502,18 +477,6 @@ for update in range(starting_update, num_updates + 1):
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
-        if args.kle_stop:
-            if approx_kl > args.target_kl:
-                break
-        if args.kle_rollback:
-            if (b_logprobs[minibatch_ind] - agent.get_action(
-                    b_obs[minibatch_ind],
-                    b_actions.long()[minibatch_ind].T,
-                    b_invalid_action_masks[minibatch_ind],
-                    envs)[1]).mean() > args.target_kl:
-                agent.load_state_dict(target_agent.state_dict())
-                break
-
     ## CRASH AND RESUME LOGIC:
     if args.prod_mode:
         if not os.path.exists(f"models/{experiment_name}"):
@@ -530,6 +493,7 @@ for update in range(starting_update, num_updates + 1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
     print("SPS:", int(global_step / (time.time() - start_time)))
 
 envs.close()
