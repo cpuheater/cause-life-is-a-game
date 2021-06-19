@@ -151,6 +151,7 @@ class InfoWrapper(gym.Wrapper):
         if done:
             info = {"reward": sum(self._rewards),
                     "length": len(self._rewards)}
+            print(f"reward: {sum(self._rewards)}")
 
         return vis_obs, reward, done, info
 

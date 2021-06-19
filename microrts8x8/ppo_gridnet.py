@@ -187,7 +187,7 @@ envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
 if args.capture_video:
     envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
-                            record_video_trigger=lambda x: x % 1000000 == 0, video_length=2000)
+                            record_video_trigger=lambda x: x % 10000000 == 0, video_length=2000)
 # if args.prod_mode:
 #     envs = VecPyTorch(
 #         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
