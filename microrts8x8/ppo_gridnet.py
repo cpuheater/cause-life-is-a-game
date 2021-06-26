@@ -28,11 +28,11 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=6e-4,
+    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=50000000,
+    parser.add_argument('--total-timesteps', type=int, default=40000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -86,8 +86,8 @@ if __name__ == "__main__":
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    #if not args.seed:
+    args.seed = int(time.time())
 args.num_envs = args.num_selfplay_envs + args.num_bot_envs
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
@@ -186,7 +186,7 @@ envs = MicroRTSGridModeVecEnv(
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
 if args.capture_video:
-    envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
+        envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x: x % 10000000 == 0, video_length=2000)
 # if args.prod_mode:
 #     envs = VecPyTorch(

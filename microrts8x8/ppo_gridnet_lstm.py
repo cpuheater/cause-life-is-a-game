@@ -28,11 +28,11 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="Microrts8-workerRushAI-lstm2",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=6e-4,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=50000000,
+    parser.add_argument('--total-timesteps', type=int, default=40000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -191,7 +191,7 @@ envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
 if args.capture_video:
    envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
-                            record_video_trigger=lambda x: x % 10000000 == 0, video_length=2000)
+                            record_video_trigger=lambda x:  x % 500000 == 0, video_length=2000)
 # if args.prod_mode:
 #     envs = VecPyTorch(
 #         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
