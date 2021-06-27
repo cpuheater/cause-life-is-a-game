@@ -219,8 +219,6 @@ class MultiHeadRelationalModule(torch.nn.Module):
         super(MultiHeadRelationalModule, self).__init__()
         self.conv1_ch = 16
         self.conv2_ch = 20
-        self.conv3_ch = 24
-        self.conv4_ch = 30
         self.H = 28
         self.W = 28
         self.node_size = 64
