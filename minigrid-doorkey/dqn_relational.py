@@ -225,7 +225,7 @@ class MultiHeadRelationalModule(torch.nn.Module):
         self.ch_in = 3
         self.sp_coord_dim = 2
         self.N = int(7 ** 2)
-        self.n_heads = 2
+        self.n_heads = 3
 
         self.conv1 = nn.Conv2d(self.ch_in, self.conv1_ch, kernel_size=(1, 1), padding=0)  # A
         self.conv2 = nn.Conv2d(self.conv1_ch, self.conv2_ch, kernel_size=(1, 1), padding=0)

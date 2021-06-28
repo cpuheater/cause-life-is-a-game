@@ -337,10 +337,6 @@ class MultiHeadRelationalModule(torch.nn.Module):
         #self.norm1 = nn.LayerNorm([self.N, self.node_size], elementwise_affine=False)
         #self.linear2 = nn.Linear(self.node_size, self.out_dim)
         self.fc_seq = nn.Sequential(nn.Linear(22, 256),
-                                    nn.ReLU(),
-                                    nn.Linear(256, 256),
-                                    nn.ReLU(),
-                                    nn.Linear(256, 256),
                                     nn.ReLU())
         self.value = nn.Linear(256, self.out_dim)
 
