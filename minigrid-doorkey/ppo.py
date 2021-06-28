@@ -138,15 +138,8 @@ class InfoWrapper(gym.Wrapper):
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self._rewards.append(reward)
-        ## Retrieve the RGB frame of the agent's vision
         vis_obs = obs["image"]
 
-        ## Render the environment in realtime
-        #if self._realtime_mode:
-        #    self._env.render(tile_size=96)
-        #    time.sleep(0.5)
-
-        # Wrap up episode information once completed (i.e. done)
         if done:
             print(f"rewards: {sum(self._rewards)}")
             info = {"reward": sum(self._rewards),
@@ -158,6 +151,7 @@ class WarpFrame(gym.ObservationWrapper):
     def __init__(self, env, width=84, height=84):
         super().__init__(env)
         self.observation_space = env.observation_space.spaces['image']
+        self.action_space = Discrete(5)
 
     def observation(self, obs):
         return obs
@@ -277,6 +271,8 @@ rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
+action_map = [0, 1, 2, 3, 5]
+
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
@@ -306,6 +302,7 @@ for update in range(1, num_updates+1):
         logprobs[step] = logproba
 
         # TRY NOT TO MODIFY: execute the game and log data.
+        action[action == 4] = 5
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 

@@ -51,14 +51,13 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
-from einops import rearrange
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-8x8-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -103,21 +102,21 @@ if __name__ == "__main__":
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
-                         help="the K epochs to update the policy")
+                        help="the K epochs to update the policy")
     parser.add_argument('--kle-stop', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                         help='If toggled, the policy updates will be early stopped w.r.t target-kl')
+                        help='If toggled, the policy updates will be early stopped w.r.t target-kl')
     parser.add_argument('--kle-rollback', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                         help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
+                        help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
     parser.add_argument('--target-kl', type=float, default=0.03,
-                         help='the target-kl variable that is referred by --kl')
+                        help='the target-kl variable that is referred by --kl')
     parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                         help='Use GAE for advantage computation')
+                        help='Use GAE for advantage computation')
     parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help="Toggles advantages normalization")
+                        help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help="Toggle learning rate annealing for policy and value networks")
+                        help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+                        help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
     #if not args.seed:
@@ -133,32 +132,26 @@ class InfoWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
-        vis_obs = obs["image"]
         self._rewards = []
-        return vis_obs
+        return obs["image"]
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self._rewards.append(reward)
         vis_obs = obs["image"]
 
-        ## Render the environment in realtime
-        #if self._realtime_mode:
-        #    self._env.render(tile_size=96)
-        #    time.sleep(0.5)
-
-        # Wrap up episode information once completed (i.e. done)
         if done:
+            print(f"rewards: {sum(self._rewards)}")
             info = {"reward": sum(self._rewards),
                     "length": len(self._rewards)}
-            print(f"reward: {sum(self._rewards)}")
 
         return vis_obs, reward, done, info
 
 class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env):
+    def __init__(self, env, width=84, height=84):
         super().__init__(env)
         self.observation_space = env.observation_space.spaces['image']
+        self.action_space = Discrete(5)
 
     def observation(self, obs):
         return obs
@@ -187,7 +180,7 @@ class VecPyTorch(VecEnvWrapper):
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
-        '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+    '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
@@ -214,9 +207,9 @@ def make_env(seed):
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
 envs = VecPyTorch(
-         SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-         device
-     )
+    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+    device
+)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
@@ -236,71 +229,21 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
-        self.num_heads = 3
-        self.node_size = 64
-        self.conv2_out_channels = 20
-        self.sp_coord_dim = 2
-        self.N = int(7 ** 2)
         self.network = nn.Sequential(
+            # Scale(1/255),
             layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, self.conv2_out_channels, kernel_size=(1, 1), padding=0)),
+            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(980, 124)),
+            nn.ReLU()
         )
-        self.proj_shape = (self.conv2_out_channels + self.sp_coord_dim, self.num_heads * self.node_size)
-        self.k_proj = nn.Linear(*self.proj_shape)
-        self.q_proj = nn.Linear(*self.proj_shape)
-        self.v_proj = nn.Linear(*self.proj_shape)
-
-        self.k_lin = nn.Linear(self.node_size, self.N)
-        self.q_lin = nn.Linear(self.node_size, self.N)
-        self.a_lin = nn.Linear(self.N, self.N)
-
-        self.node_shape = (self.num_heads, self.N, self.node_size)
-        self.k_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
-        self.q_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
-        self.v_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
-
-        self.linear1 = nn.Linear(self.num_heads * self.node_size, self.node_size)
-        self.norm1 = nn.LayerNorm([self.N, self.node_size], elementwise_affine=False)
-        self.linear2 = nn.Linear(self.node_size, self.node_size)
-        self.actor = layer_init(nn.Linear(self.node_size, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(self.node_size, 1), std=1)
+        self.actor = layer_init(nn.Linear(124, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(124, 1), std=1)
 
     def forward(self, x):
-        N, C, H, W = x.shape
-        x = self.network(x)
-        _, _, cH, cW = x.shape
-        xcoords = torch.arange(cW).repeat(cH, 1).float().to(device) / cW  # G
-        ycoords = torch.arange(cH).repeat(cW, 1).transpose(1, 0).float().to(device) / cH
-        spatial_coords = torch.stack([xcoords, ycoords], dim=0)
-        spatial_coords = spatial_coords.unsqueeze(dim=0)
-        spatial_coords = spatial_coords.repeat(N, 1, 1, 1)
-        x = torch.cat([x, spatial_coords], dim=1)
-        x = x.permute(0, 2, 3, 1)
-        x = x.flatten(1, 2)
-        K = rearrange(self.k_proj(x), "b n (head d) -> b head n d", head=self.num_heads)
-        K = self.k_norm(K)
-
-        Q = rearrange(self.q_proj(x), "b n (head d) -> b head n d", head=self.num_heads)
-        Q = self.q_norm(Q)
-
-        V = rearrange(self.v_proj(x), "b n (head d) -> b head n d", head=self.num_heads)
-        V = self.v_norm(V)
-        A = torch.nn.functional.elu(self.q_lin(Q) + self.k_lin(K))  # D
-        A = self.a_lin(A)
-        A = torch.nn.functional.softmax(A, dim=3)
-        with torch.no_grad():
-            self.att_map = A.clone()  # E
-        E = torch.einsum('bhfc,bhcd->bhfd', A, V)  # F
-        E = rearrange(E, 'b head n d -> b n (head d)')
-        E = self.linear1(E)
-        E = torch.relu(E)
-        E = self.norm1(E)
-        E = E.max(dim=1)[0]
-        y = self.linear2(E)
-        y = torch.nn.functional.elu(y)
-        return y
+        return self.network(x)
 
     def get_action(self, x, action=None):
         x = self.forward(x)
@@ -327,6 +270,8 @@ logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+
+action_map = [0, 1, 2, 3, 5]
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
@@ -357,6 +302,7 @@ for update in range(1, num_updates+1):
         logprobs[step] = logproba
 
         # TRY NOT TO MODIFY: execute the game and log data.
+        action[action == 4] = 5
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 

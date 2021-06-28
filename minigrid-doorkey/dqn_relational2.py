@@ -218,7 +218,7 @@ from collections import OrderedDict
 
 class AttentionHead(nn.Module):
 
-    def __init__(self, n_elems, elem_size, emb_size):
+    def __init__(self, elem_size, emb_size):
         super(AttentionHead, self).__init__()
         self.sqrt_emb_size = int(math.sqrt(emb_size))
         #queries, keys, values
@@ -258,12 +258,12 @@ class AttentionHead(nn.Module):
 
 class AttentionModule(nn.Module):
 
-    def __init__(self, n_elems, elem_size, emb_size, n_heads):
+    def __init__(self, elem_size, emb_size, n_heads):
         super(AttentionModule, self).__init__()
         # self.input_shape = input_shape
         # self.elem_size = elem_size
         # self.emb_size = emb_size #honestly not really needed
-        self.heads =  nn.ModuleList(AttentionHead(n_elems, elem_size, emb_size) for _ in range(n_heads))
+        self.heads =  nn.ModuleList(AttentionHead(elem_size, emb_size) for _ in range(n_heads))
         self.linear1 = nn.Linear(n_heads*elem_size, elem_size)
         self.linear2 = nn.Linear(elem_size, elem_size)
 
@@ -296,8 +296,6 @@ class MultiHeadRelationalModule(torch.nn.Module):
         self.conv2_ch = 20
         self.conv3_ch = 24
         self.conv4_ch = 30
-        self.H = 28
-        self.W = 28
         self.node_size = 64
         self.lin_hid = 100
         self.out_dim = 5
@@ -305,26 +303,46 @@ class MultiHeadRelationalModule(torch.nn.Module):
         self.sp_coord_dim = 2
         self.N = int(7 ** 2)
         self.n_heads = 3
+        self.input_h_w = 7
 
-        self.conv1 = nn.Conv2d(self.ch_in, self.conv1_ch, kernel_size=(1, 1), padding=0)  # A
+        self.conv1 = nn.Conv2d(self.ch_in, self.conv1_ch, kernel_size=(1, 1), padding=0)
         self.conv2 = nn.Conv2d(self.conv1_ch, self.conv2_ch, kernel_size=(1, 1), padding=0)
-        self.proj_shape = (self.conv2_ch + self.sp_coord_dim, self.n_heads * self.node_size)
-        self.k_proj = nn.Linear(*self.proj_shape)
-        self.q_proj = nn.Linear(*self.proj_shape)
-        self.v_proj = nn.Linear(*self.proj_shape)
 
-        self.k_lin = nn.Linear(self.node_size, self.N)  # B
-        self.q_lin = nn.Linear(self.node_size, self.N)
-        self.a_lin = nn.Linear(self.N, self.N)
 
-        self.node_shape = (self.n_heads, self.N, self.node_size)
-        self.k_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
-        self.q_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
-        self.v_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+        xmap = np.linspace(-np.ones(self.input_h_w), np.ones(self.input_h_w), num=self.input_h_w, endpoint=True, axis=0)
+        xmap = torch.tensor(np.expand_dims(np.expand_dims(xmap,0),0), dtype=torch.float32, requires_grad=False)
+        ymap = np.linspace(-np.ones(self.input_h_w), np.ones(self.input_h_w), num=self.input_h_w, endpoint=True, axis=1)
+        ymap = torch.tensor(np.expand_dims(np.expand_dims(ymap,0),0), dtype=torch.float32, requires_grad=False)
+        self.register_buffer("xymap", torch.cat((xmap,ymap),dim=1)) # shape (1, 2, conv2w, conv2h)
 
-        self.linear1 = nn.Linear(self.n_heads * self.node_size, self.node_size)
-        self.norm1 = nn.LayerNorm([self.N, self.node_size], elementwise_affine=False)
-        self.linear2 = nn.Linear(self.node_size, self.out_dim)
+        att_elem_size = self.conv2_ch + 2
+        self.n_att_stack = self.conv2_ch
+        self.attMod = AttentionModule(att_elem_size, self.node_size, self.n_heads)
+
+        #self.proj_shape = (self.conv2_ch + self.sp_coord_dim, self.n_heads * self.node_size)
+        #self.k_proj = nn.Linear(*self.proj_shape)
+        #self.q_proj = nn.Linear(*self.proj_shape)
+        #self.v_proj = nn.Linear(*self.proj_shape)
+
+        #self.k_lin = nn.Linear(self.node_size, self.N)  # B
+        #self.q_lin = nn.Linear(self.node_size, self.N)
+        #self.a_lin = nn.Linear(self.N, self.N)
+
+        #self.node_shape = (self.n_heads, self.N, self.node_size)
+        #self.k_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+        #self.q_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+        #self.v_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+
+        #self.linear1 = nn.Linear(self.n_heads * self.node_size, self.node_size)
+        #self.norm1 = nn.LayerNorm([self.N, self.node_size], elementwise_affine=False)
+        #self.linear2 = nn.Linear(self.node_size, self.out_dim)
+        self.fc_seq = nn.Sequential(nn.Linear(22, 256),
+                                    nn.ReLU(),
+                                    nn.Linear(256, 256),
+                                    nn.ReLU(),
+                                    nn.Linear(256, 256),
+                                    nn.ReLU())
+        self.value = nn.Linear(256, self.out_dim)
 
     def forward(self, x):
         N, Cin, H, W = x.shape
@@ -332,40 +350,25 @@ class MultiHeadRelationalModule(torch.nn.Module):
         x = torch.relu(x)
         x = self.conv2(x)
         x = torch.relu(x)
-        with torch.no_grad():
-            self.conv_map = x.clone()  # C
-        _, _, cH, cW = x.shape
-        xcoords = torch.arange(cW).repeat(cH, 1).float().to(device) / cW
-        ycoords = torch.arange(cH).repeat(cW, 1).transpose(1, 0).float().to(device) / cH
-        spatial_coords = torch.stack([xcoords, ycoords], dim=0)
-        spatial_coords = spatial_coords.unsqueeze(dim=0)
-        spatial_coords = spatial_coords.repeat(N, 1, 1, 1)
-        x = torch.cat([x, spatial_coords], dim=1)
-        x = x.permute(0, 2, 3, 1)
-        x = x.flatten(1, 2)
+        batchsize = x.size(0)
+        batch_maps = self.xymap.repeat(batchsize,1,1,1,)
+        x = torch.cat((x,batch_maps),1)
 
-        K = rearrange(self.k_proj(x), "b n (head d) -> b head n d", head=self.n_heads)
-        K = self.k_norm(K)
+        a = x.view(x.size(0),x.size(1), -1).transpose(1,2)
+        # n_att_mod passes through attentional module -> n_att_mod stacked modules with weight sharing
+        for i_att in range(self.n_att_stack):
+            a = self.attMod(a)
 
-        Q = rearrange(self.q_proj(x), "b n (head d) -> b head n d", head=self.n_heads)
-        Q = self.q_norm(Q)
+        kernelsize = a.shape[1]
 
-        V = rearrange(self.v_proj(x), "b n (head d) -> b head n d", head=self.n_heads)
-        V = self.v_norm(V)
-        A = torch.nn.functional.elu(self.q_lin(Q) + self.k_lin(K))  # D
-        A = self.a_lin(A)
-        A = torch.nn.functional.softmax(A, dim=3)
-        with torch.no_grad():
-            self.att_map = A.clone()  # E
-        E = torch.einsum('bhfc,bhcd->bhfd', A, V)  # F
-        E = rearrange(E, 'b head n d -> b n (head d)')
-        E = self.linear1(E)
-        E = torch.relu(E)
-        E = self.norm1(E)
-        E = E.max(dim=1)[0]
-        y = self.linear2(E)
-        y = torch.nn.functional.elu(y)
-        return y
+        if type(kernelsize) == torch.Tensor:
+            kernelsize = kernelsize.item()
+        pooled = F.max_pool1d(a.transpose(1,2), kernel_size=kernelsize) #pool out entity dimension
+        #policy module: 4xFC256, then project to logits and value
+        p = self.fc_seq(pooled.view(pooled.size(0),pooled.size(1)))
+        #pi = F.softmax(self.logits(p), dim=1)
+        v = self.value(p)
+        return v
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
