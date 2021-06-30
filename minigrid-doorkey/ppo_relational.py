@@ -226,24 +226,133 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class AttentionHead(nn.Module):
+
+    def __init__(self, elem_size, emb_size):
+        super(AttentionHead, self).__init__()
+        self.sqrt_emb_size = int(math.sqrt(emb_size))
+        #queries, keys, values
+        self.query = layer_init(nn.Linear(elem_size, emb_size))
+        self.key = layer_init(nn.Linear(elem_size, emb_size))
+        self.value = layer_init(nn.Linear(elem_size, elem_size))
+        #layer norms:
+        # In the paper the authors normalize the projected Q,K and V with layer normalization. They don't state
+        # explicitly over which dimensions they normalize and how exactly gains and biases are shared. I decided to
+        # stick with with the solution from https://github.com/gyh75520/Relational_DRL/ because it makes the most
+        # sense to me: 0,1-normalize every projected entity and apply separate gain and bias to each entry in the
+        # embeddings. Weights are shared across entites, but not accross Q,K,V or heads.
+        self.qln = nn.LayerNorm(emb_size, elementwise_affine=True)
+        self.kln = nn.LayerNorm(emb_size, elementwise_affine=True)
+        self.vln = nn.LayerNorm(elem_size, elementwise_affine=True)
+
+    def forward(self, x):
+        # print(f"input: {x.shape}")
+        Q = self.qln(self.query(x))
+        K = self.kln(self.key(x))
+        V = self.vln(self.value(x))
+        # softmax is taken over last dimension (rows) of QK': All the attentional weights going into a column/entity
+        # of V thus sum up to 1.
+        softmax = F.softmax(torch.bmm(Q,K.transpose(1,2))/self.sqrt_emb_size, dim=-1)
+        # print(f"softmax shape: {softmax.shape} and sum accross batch 1, column 1: {torch.sum(softmax[0,0,:])}")
+        return torch.bmm(softmax,V)
+
+    def attention_weights(self, x):
+        # print(f"input: {x.shape}")
+        Q = self.qln(self.query(x))
+        K = self.kln(self.key(x))
+        V = self.vln(self.value(x))
+        # softmax is taken over last dimension (rows) of QK': All the attentional weights going into a column/entity
+        # of V thus sum up to 1.
+        softmax = F.softmax(torch.bmm(Q,K.transpose(1,2))/self.sqrt_emb_size, dim=-1)
+        return softmax
+
+class AttentionModule(nn.Module):
+
+    def __init__(self, elem_size, emb_size, n_heads):
+        super(AttentionModule, self).__init__()
+        # self.input_shape = input_shape
+        # self.elem_size = elem_size
+        # self.emb_size = emb_size #honestly not really needed
+        self.heads =  nn.ModuleList(AttentionHead(elem_size, emb_size) for _ in range(n_heads))
+        self.linear1 = nn.Linear(n_heads*elem_size, elem_size)
+        self.linear2 = nn.Linear(elem_size, elem_size)
+        self.ln = nn.LayerNorm(elem_size, elementwise_affine=True)
+
+    def forward(self, x):
+        #concatenate all heads' outputs
+        A_cat = torch.cat([head(x) for head in self.heads], -1)
+        # projecting down to original element size with 2-layer MLP, layer size = entity size
+        mlp_out = F.relu(self.linear2(F.relu(self.linear1(A_cat))))
+        # residual connection and final layer normalization
+        return self.ln(x + mlp_out)
+
+    def get_att_weights(self, x):
+        """Version of forward function that also returns softmax-normalied QK' attention weights"""
+        #concatenate all heads' outputs
+        A_cat = torch.cat([head(x) for head in self.heads], -1)
+        # projecting down to original element size with 2-layer MLP, layer size = entity size
+        mlp_out = F.relu(self.linear2(F.relu(self.linear1(A_cat))))
+        # residual connection and final layer normalization
+        output = self.ln(x + mlp_out)
+        attention_weights = [head.attention_weights(x).detach() for head in self.heads]
+        return [output, attention_weights]
+
 class Agent(nn.Module):
     def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
-        self.network = nn.Sequential(
-            # Scale(1/255),
-            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(980, 124)),
-            nn.ReLU()
-        )
-        self.actor = layer_init(nn.Linear(124, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(124, 1), std=1)
+
+        self.conv1_ch = 16
+        self.conv2_ch = 20
+        self.conv3_ch = 24
+        self.conv4_ch = 30
+        self.node_size = 64
+        self.lin_hid = 100
+        self.out_dim = 5
+        self.ch_in = 3
+        self.sp_coord_dim = 2
+        self.N = int(7 ** 2)
+        self.n_heads = 3
+        self.input_h_w = 7
+
+        self.conv1 = nn.Conv2d(self.ch_in, self.conv1_ch, kernel_size=(1, 1), padding=0)
+        self.conv2 = nn.Conv2d(self.conv1_ch, self.conv2_ch, kernel_size=(1, 1), padding=0)
+
+        xmap = np.linspace(-np.ones(self.input_h_w), np.ones(self.input_h_w), num=self.input_h_w, endpoint=True, axis=0)
+        xmap = torch.tensor(np.expand_dims(np.expand_dims(xmap,0),0), dtype=torch.float32, requires_grad=False)
+        ymap = np.linspace(-np.ones(self.input_h_w), np.ones(self.input_h_w), num=self.input_h_w, endpoint=True, axis=1)
+        ymap = torch.tensor(np.expand_dims(np.expand_dims(ymap,0),0), dtype=torch.float32, requires_grad=False)
+        self.register_buffer("xymap", torch.cat((xmap,ymap),dim=1)) # shape (1, 2, conv2w, conv2h)
+
+        att_elem_size = self.conv2_ch + 2
+        self.n_att_stack = self.conv2_ch
+        self.attMod = AttentionModule(att_elem_size, self.node_size, self.n_heads)
+
+        self.fc_seq = nn.Sequential(nn.Linear(22, 256),
+                                    nn.ReLU())
+        self.critic = layer_init(nn.Linear(256, 1), std=1)
+        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
 
     def forward(self, x):
-        return self.network(x)
+        N, Cin, H, W = x.shape
+        x = self.conv1(x)
+        x = torch.relu(x)
+        x = self.conv2(x)
+        x = torch.relu(x)
+        batchsize = x.size(0)
+        batch_maps = self.xymap.repeat(batchsize,1,1,1,)
+        x = torch.cat((x,batch_maps),1)
+
+        a = x.view(x.size(0),x.size(1), -1).transpose(1,2)
+        for i_att in range(self.n_att_stack):
+            a = self.attMod(a)
+
+        kernelsize = a.shape[1]
+
+        if type(kernelsize) == torch.Tensor:
+            kernelsize = kernelsize.item()
+        pooled = F.max_pool1d(a.transpose(1,2), kernel_size=kernelsize)
+        out = self.fc_seq(pooled.view(pooled.size(0),pooled.size(1)))
+        return out
 
     def get_action(self, x, action=None):
         x = self.forward(x)

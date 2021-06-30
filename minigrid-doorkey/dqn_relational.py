@@ -227,23 +227,23 @@ class MultiHeadRelationalModule(torch.nn.Module):
         self.N = int(7 ** 2)
         self.n_heads = 3
 
-        self.conv1 = nn.Conv2d(self.ch_in, self.conv1_ch, kernel_size=(1, 1), padding=0)  # A
-        self.conv2 = nn.Conv2d(self.conv1_ch, self.conv2_ch, kernel_size=(1, 1), padding=0)
+        self.conv1 = layer_init(nn.Conv2d(self.ch_in, self.conv1_ch, kernel_size=(1, 1), padding=0))  # A
+        self.conv2 = layer_init(nn.Conv2d(self.conv1_ch, self.conv2_ch, kernel_size=(1, 1), padding=0))
         self.proj_shape = (self.conv2_ch + self.sp_coord_dim, self.n_heads * self.node_size)
-        self.k_proj = nn.Linear(*self.proj_shape)
-        self.q_proj = nn.Linear(*self.proj_shape)
-        self.v_proj = nn.Linear(*self.proj_shape)
+        self.k_proj = layer_init(nn.Linear(*self.proj_shape))
+        self.q_proj = layer_init(nn.Linear(*self.proj_shape))
+        self.v_proj = layer_init(nn.Linear(*self.proj_shape))
 
-        self.k_lin = nn.Linear(self.node_size, self.N)  # B
-        self.q_lin = nn.Linear(self.node_size, self.N)
-        self.a_lin = nn.Linear(self.N, self.N)
+        self.k_lin = layer_init(nn.Linear(self.node_size, self.N))  # B
+        self.q_lin = layer_init(nn.Linear(self.node_size, self.N))
+        self.a_lin = layer_init(nn.Linear(self.N, self.N))
 
         self.node_shape = (self.n_heads, self.N, self.node_size)
         self.k_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
         self.q_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
         self.v_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
 
-        self.linear1 = nn.Linear(self.n_heads * self.node_size, self.node_size)
+        self.linear1 = layer_init(nn.Linear(self.n_heads * self.node_size, self.node_size))
         self.norm1 = nn.LayerNorm([self.N, self.node_size], elementwise_affine=False)
         self.linear2 = nn.Linear(self.node_size, self.out_dim)
 
