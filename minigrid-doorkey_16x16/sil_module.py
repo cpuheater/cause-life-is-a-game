@@ -135,7 +135,7 @@ class sil_module:
                 # start to next...
                 actions = actions.reshape(-1)
                 actions[actions == 5] = 4
-                value, action, action_log_probs, dist_entropy = self.network.get_action(obs, actions)
+                value, _, action_log_probs, dist_entropy = self.network.get_action(obs, actions)
                 #value, pi = self.model.get_action(obs, actions)
                 #action_log_probs, dist_entropy = evaluate_actions_sil(pi, actions)
                 action_log_probs = -action_log_probs
