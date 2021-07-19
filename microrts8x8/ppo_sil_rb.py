@@ -408,8 +408,8 @@ for update in range(starting_update, num_updates + 1):
                 for key in info['microrts_stats']:
                     writer.add_scalar(f"charts/episode_reward/{key}", info['microrts_stats'][key], global_step)
                     if info['microrts_stats']["WinLossRewardFunction"] > 0:
-                            print(f"winner step: {step} index: {idx}")
-                            wins[step][idx] = 1
+                        print(f"winner step: {step} index: {idx}")
+                        wins[step][idx] = 1
                 break
         sil.step(obs[step].cpu().numpy(), action.cpu().numpy(), copy.deepcopy(rs.reshape(-1)), ds, invalid_action_masks[step].cpu().numpy(), wins[step])
 
