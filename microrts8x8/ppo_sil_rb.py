@@ -20,7 +20,7 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
-from sil_module import sil_module
+from sil_rb import sil_module
 import copy
 
 if __name__ == "__main__":

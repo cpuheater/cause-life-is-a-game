@@ -20,7 +20,7 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
-from sil_module import sil_module
+from sil import sil_module
 import copy
 
 if __name__ == "__main__":
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
+    parser.add_argument('--gym-id', type=str, default="Microrts8-coacAI",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
     # SIL
     parser.add_argument('--num-update', type=int, default=10, help='')
-    parser.add_argument('--capacity', type=int, default=20000, help='')
+    parser.add_argument('--capacity', type=int, default=18000, help='')
     parser.add_argument('--sil-beta', type=float, default=0.1, help='')
     parser.add_argument('--sil-alpha', type=float, default=0.6, help='')
     parser.add_argument('--max-nlogp', type=int, default=5, help='')
@@ -192,7 +192,7 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=1300,
     render_theme=2,
-    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.coacAI for _ in range(args.num_bot_envs)],
     map_path="maps/8x8/basesWorkers8x8.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )

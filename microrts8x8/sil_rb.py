@@ -99,7 +99,7 @@ class sil_module:
         self.network = network
         self.running_episodes = [[] for _ in range(self.args.num_envs)]
         self.optimizer = optimizer
-        self.buffer = PrioritizedReplayBuffer(self.args.capacity, 0.6)
+        self.buffer = ReplayBuffer(self.args.capacity)
         # some other parameters...
         self.total_steps = []
         self.total_rewards = []
@@ -119,7 +119,7 @@ class sil_module:
     # train the sil model...
     def train_sil_model(self):
         for n in range(self.args.num_update):
-            obs, actions, returns, invalid_action_masks, weights, idxes = self.sample_batch(self.args.batch_size)
+            obs, actions, returns, invalid_action_masks = self.sample_batch(self.args.batch_size)
             mean_adv, num_valid_samples = 0, 0
             if obs is not None:
                 # need to get the masks
@@ -127,14 +127,12 @@ class sil_module:
                 obs = torch.tensor(obs, dtype=torch.float32)
                 actions = torch.tensor(actions, dtype=torch.float32)
                 returns = torch.tensor(returns, dtype=torch.float32).unsqueeze(1)
-                weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1)
                 invalid_action_masks = torch.tensor(invalid_action_masks, dtype=torch.float32)
-                max_nlogp = torch.tensor(np.ones((len(idxes), 1)) * self.args.max_nlogp, dtype=torch.float32)
+                max_nlogp = torch.tensor(np.ones((returns.shape[0], 1)) * self.args.max_nlogp, dtype=torch.float32)
                 if self.args.cuda:
                     obs = obs.cuda()
                     actions = actions.cuda()
                     returns = returns.cuda()
-                    weights = weights.cuda()
                     max_nlogp = max_nlogp.cuda()
                     invalid_action_masks = invalid_action_masks.cuda()
                 # start to next...
@@ -160,28 +158,28 @@ class sil_module:
                 mean_adv = torch.sum(clipped_advantages) / num_samples
                 mean_adv = mean_adv.item()
                 # start to get the action loss...
-                action_loss = torch.sum(clipped_advantages * weights * clipped_nlogp) / num_samples
-                entropy_reg = torch.sum(weights * dist_entropy * masks) / num_samples
+                action_loss = torch.sum(clipped_advantages * clipped_nlogp) / num_samples
+                entropy_reg = torch.sum(dist_entropy * masks) / num_samples
                 policy_loss = action_loss - entropy_reg * self.args.sil_entropy_coef
                 # start to process the value loss..
                 # get the value loss
                 delta = torch.clamp(value - returns, -self.args.clip, 0) * masks
                 delta = delta.detach()
-                value_loss = torch.sum(weights * value * delta) / num_samples
+                value_loss = torch.sum(value * delta) / num_samples
                 total_loss = policy_loss + 0.5 * self.args.w_value * value_loss
                 self.optimizer.zero_grad()
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.args.max_grad_norm)
                 self.optimizer.step()
                 # update the priorities
-                self.buffer.update_priorities(idxes, clipped_advantages.squeeze(1).cpu().numpy())
+                #self.buffer.update_priorities(idxes, clipped_advantages.squeeze(1).cpu().numpy())
         return mean_adv, num_valid_samples
 
     # update buffer
     def update_buffer(self, trajectory):
         positive_reward = False
         for (ob, a, r, invalid_action_mask, win) in trajectory:
-            if win > 0:
+            if 1 > 0:
                 positive_reward = True
                 break
         if positive_reward:
@@ -229,9 +227,9 @@ class sil_module:
     def sample_batch(self, batch_size):
         if len(self.buffer) > 100:
             batch_size = min(batch_size, len(self.buffer))
-            return self.buffer.sample(batch_size, beta=self.args.sil_beta)
+            return self.buffer.sample(batch_size)
         else:
-            return None, None, None, None, None, None
+            return None, None, None, None
 
     def discount_with_dones(self, rewards, dones, gamma):
         discounted = []

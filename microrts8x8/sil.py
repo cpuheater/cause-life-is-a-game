@@ -228,6 +228,7 @@ class sil_module:
 
     def sample_batch(self, batch_size):
         if len(self.buffer) > 100:
+            print(f"buffer size {len(self.buffer)}")
             batch_size = min(batch_size, len(self.buffer))
             return self.buffer.sample(batch_size, beta=self.args.sil_beta)
         else:
