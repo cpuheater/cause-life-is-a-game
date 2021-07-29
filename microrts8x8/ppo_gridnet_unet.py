@@ -246,6 +246,7 @@ class Transpose(nn.Module):
     def forward(self, x):
         return x.permute(self.permutation)
 
+
 class Encoder(nn.Module):
     def __init__(self, input_channels):
         super().__init__()
@@ -285,13 +286,44 @@ class Decoder(nn.Module):
     def forward(self, x):
         return self.deconv(x)
 
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=False),
+            nn.ReLU(inplace=True),
+        )
+    def forward(self, x):
+        return self.conv(x)
+
+
+
 class Agent(nn.Module):
     def __init__(self, mapsize=8 * 8):
         super(Agent, self).__init__()
         self.mapsize = mapsize
         h, w, c = envs.observation_space.shape
-        self.encoder = Encoder(c)
-        self.actor = Decoder(78)
+        self.conv1 = layer_init(nn.Conv2d(c, 32, kernel_size=3, padding=1))
+        #self nn.MaxPool2d(3, stride=2, padding=1),
+        #nn.ReLU(),
+        self.conv2 = layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1))
+        #nn.MaxPool2d(3, stride=2, padding=1),
+        #nn.ReLU(),
+        self.conv3 = layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1))
+        #nn.MaxPool2d(3, stride=2, padding=1),
+        #nn.ReLU(),
+        self.conv4 = layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1))
+        #nn.MaxPool2d(3, stride=2, padding=1)
+
+        self.bottleneck = ConvBlock(64, 128)
+
+        self.conv_up1 = layer_init(nn.ConvTranspose2d(64, 128, 3, stride=2, padding=1, output_padding=1))
+        #nn.ReLU(),
+        self.conv_up2 = layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=0))
+        #nn.ReLU(),
+        self.conv_up3 = layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1))
+        #nn.ReLU(),
+        self.conv_up4 = layer_init(nn.ConvTranspose2d(32, 78, 3, stride=1, padding=0, output_padding=0))
 
         self.critic = nn.Sequential(
             nn.Flatten(),
@@ -301,10 +333,23 @@ class Agent(nn.Module):
         )
 
     def forward(self, x):
-        return self.encoder(x)  # "bhwc" -> "bchw"
+        x = x.permute((0, 3, 1, 2))
+        conv1 = F.max_pool2d(F.relu(self.conv1(x)), 3, stride=2, padding=1)
+        conv2 = F.max_pool2d(F.relu(self.conv2(conv1)), 3, stride=2, padding=1)
+        conv3 = F.max_pool2d(F.relu(self.conv3(conv2)), 3, stride=2, padding=1)
+        conv4 = F.max_pool2d(F.relu(self.conv4(conv3)), 3, stride=2, padding=1)
+
+        self.bottleneck = ConvBlock(64, 128)
+
+        conv_up = F.relu(self.conv_up1(conv4))
+        conv_up = F.relu(self.conv_up2(conv_up))
+        conv_up = F.relu(self.conv_up3(conv_up))
+        conv_up = F.relu(self.conv_up4(conv_up))
+
+        return conv4, conv_up  # "bhwc" -> "bchw"
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
-        logits = self.actor(self.forward(x))
+        _, logits = self.forward(x)
         grid_logits = logits.reshape(-1, envs.action_space.nvec[1:].sum())
         split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
 
@@ -333,7 +378,7 @@ class Agent(nn.Module):
         return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
 
     def get_value(self, x):
-        return self.critic(self.forward(x))
+        return self.critic(self.forward(x)[0])
 
 
 agent = Agent().to(device)
