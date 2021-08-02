@@ -298,7 +298,7 @@ class ImageToPyTorch(gym.ObservationWrapper):
     def observation(self, observation):
         return np.transpose(observation, axes=(2, 0, 1))
 
-def wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=False, scale=False):
+def wrap_deepmind(env, episode_life=False, clip_rewards=True, frame_stack=False, scale=False):
     """Configure environment for DeepMind-style Atari.
     """
     if episode_life:
@@ -403,7 +403,7 @@ env = wrap_deepmind(
     env,
     clip_rewards=True,
     frame_stack=True,
-    scale=True,
+    scale=False,
 )
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -483,6 +483,7 @@ class Policy(nn.Module):
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
+        x = x / 255.0
         #x = F.relu(self.fc1(x))
         #x = F.relu(self.fc2(x))
         #mean = self.mean(x)
@@ -575,6 +576,7 @@ class SoftQNetwork(nn.Module):
         #x = self.fc3(x)
         #return x
         x = torch.Tensor(x).to(device)
+        x = x / 255.0
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
@@ -613,6 +615,8 @@ qf1 = SoftQNetwork(input_shape, env.action_space.n, layer_init).to(device)
 qf2 = SoftQNetwork(input_shape, env.action_space.n, layer_init).to(device)
 qf1_target = SoftQNetwork(input_shape, env.action_space.n, layer_init).to(device)
 qf2_target = SoftQNetwork(input_shape, env.action_space.n, layer_init).to(device)
+qf1_target.eval()
+qf2_target.eval()
 qf1_target.load_state_dict(qf1.state_dict())
 qf2_target.load_state_dict(qf2.state_dict())
 values_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
@@ -650,7 +654,7 @@ for global_step in range(1, args.total_timesteps+1):
     obs = np.array(next_obs)
 
     # ALGO LOGIC: training.
-    if len(rb.buffer) > args.batch_size: # starts update as soon as there is enough data.
+    if len(rb.buffer) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
             probs, next_state_log_probs = pg.forward(s_next_obses, device)
@@ -686,32 +690,37 @@ for global_step in range(1, args.total_timesteps+1):
                         probs, log_probs = pg.forward(s_obs, device)
                     probabilities = (probs * log_probs).sum(-1)
                     alpha_loss = -(log_alpha * (probabilities + target_entropy)).mean()
-                    print(f"log_alpha: {log_alpha} alpha loss: {alpha_loss} alpha: {alpha}")
                     a_optimizer.zero_grad()
                     alpha_loss.backward()
                     a_optimizer.step()
                     alpha = log_alpha.exp().item()
 
         # update the target network
-        if global_step % args.target_network_frequency == 0:
-            for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
-                target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-            for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
-                target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+        if global_step % (args.target_network_frequency * 4) == 0:
+            print(f"target update {global_step}")
+            qf1_target.load_state_dict(qf1.state_dict())
+            qf1_target.eval()
+            qf2_target.load_state_dict(qf2.state_dict())
+            qf2_target.eval()
+            #for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
+            #    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+            #for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
+            #    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
     if len(rb.buffer) > args.batch_size and global_step % 100 == 0:
         writer.add_scalar("losses/soft_q_value_1_loss", qf1_loss.item(), global_step)
         writer.add_scalar("losses/soft_q_value_2_loss", qf2_loss.item(), global_step)
         writer.add_scalar("losses/qf_loss", qf_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", policy_loss.item(), global_step)
-        writer.add_scalar("losses/alpha", alpha, global_step)
+        writer.add_scalar("alpha", alpha, global_step)
         if args.autotune:
             writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
     if done:
+        print(f"Episode reward {episode_reward}")
         global_episode += 1 # Outside the loop already means the epsiode is done
-        print(episode_reward)
-        writer.add_scalar("charts/max_episode_reward", max(max_episode_reward, episode_reward), global_step)
+        max_episode_reward = max(max_episode_reward, episode_reward)
+        writer.add_scalar("charts/max_episode_reward", max_episode_reward, global_step)
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/episode_length", episode_length, global_step)
         # Terminal verbosity

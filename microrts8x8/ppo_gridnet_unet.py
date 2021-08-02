@@ -290,7 +290,7 @@ class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(ConvBlock, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=False),
+            layer_init(nn.Conv2d(in_channels, out_channels, 3, 1, 1)),
             nn.ReLU(inplace=True),
         )
     def forward(self, x):
@@ -312,18 +312,16 @@ class Agent(nn.Module):
         self.conv3 = layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1))
         #nn.MaxPool2d(3, stride=2, padding=1),
         #nn.ReLU(),
-        self.conv4 = layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1))
+        #self.conv4 = layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1))
         #nn.MaxPool2d(3, stride=2, padding=1)
 
-        self.bottleneck = ConvBlock(64, 128)
-
-        self.conv_up1 = layer_init(nn.ConvTranspose2d(64, 128, 3, stride=2, padding=1, output_padding=1))
+        self.conv_up1 = layer_init(nn.ConvTranspose2d(128, 128, 3, padding=1, output_padding=0))
         #nn.ReLU(),
-        self.conv_up2 = layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=0))
+        self.conv_up2 = layer_init(nn.ConvTranspose2d(256, 64, 3, stride=2, padding=1, output_padding=1))
         #nn.ReLU(),
-        self.conv_up3 = layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1))
+        self.conv_up3 = layer_init(nn.ConvTranspose2d(128, 32, 3, stride=2, padding=1, output_padding=1))
         #nn.ReLU(),
-        self.conv_up4 = layer_init(nn.ConvTranspose2d(32, 78, 3, stride=1, padding=0, output_padding=0))
+        #self.conv_up4 = layer_init(nn.ConvTranspose2d(64, 78, 3, stride=2, padding=1, output_padding=1))
 
         self.critic = nn.Sequential(
             nn.Flatten(),
@@ -332,21 +330,24 @@ class Agent(nn.Module):
             layer_init(nn.Linear(64, 1), std=1)
         )
 
+        self.bottleneck = ConvBlock(64, 64)
+
     def forward(self, x):
         x = x.permute((0, 3, 1, 2))
-        conv1 = F.max_pool2d(F.relu(self.conv1(x)), 3, stride=2, padding=1)
-        conv2 = F.max_pool2d(F.relu(self.conv2(conv1)), 3, stride=2, padding=1)
-        conv3 = F.max_pool2d(F.relu(self.conv3(conv2)), 3, stride=2, padding=1)
-        conv4 = F.max_pool2d(F.relu(self.conv4(conv3)), 3, stride=2, padding=1)
+        conv1 = F.relu(F.max_pool2d(self.conv1(x), 3, stride=2, padding=1))
+        conv2 = F.relu(F.max_pool2d(self.conv2(conv1), 3, stride=2, padding=1))
+        conv3 = F.relu(F.max_pool2d(self.conv3(conv2), 3, stride=2, padding=1))
+        #conv4 = F.relu(F.max_pool2d(self.conv4(conv3), 3, stride=2, padding=1))
 
-        self.bottleneck = ConvBlock(64, 128)
+        bottleneck = self.bottleneck(conv3)
 
-        conv_up = F.relu(self.conv_up1(conv4))
-        conv_up = F.relu(self.conv_up2(conv_up))
-        conv_up = F.relu(self.conv_up3(conv_up))
-        conv_up = F.relu(self.conv_up4(conv_up))
+        conv_up = F.relu(self.conv_up1(torch.cat((conv3, bottleneck), dim=1)))
+        conv_up = F.relu(self.conv_up2(torch.cat((conv2, conv_up), dim=1)))
+        conv_up = F.relu(self.conv_up3(torch.cat((conv1, conv_up), dim=1)))
+        #conv_up = F.relu(self.conv_up4(torch.cat((conv1, conv_up), dim=1)))
+        conv_up = conv_up.permute(0, 2, 3, 1)
 
-        return conv4, conv_up  # "bhwc" -> "bchw"
+        return conv3, conv_up  # "bhwc" -> "bchw"
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
         _, logits = self.forward(x)
