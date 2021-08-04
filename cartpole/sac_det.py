@@ -23,64 +23,13 @@ from collections import deque
 import cv2
 from gym_minigrid.wrappers import *
 
-class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
-
-    def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.uint8,
-        )
-
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
-
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
-
-class WrapFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84):
-        super().__init__(env)
-        self.observation_space = env.observation_space.spaces['image']
-        self.action_space = Discrete(5)
-
-    def observation(self, obs):
-        return obs
-
-class InfoWrapper(gym.Wrapper):
-    def __init__(self, env):
-        gym.Wrapper.__init__(self, env)
-        self._rewards = []
-
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        self._rewards = []
-        return obs["image"]
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self._rewards.append(reward)
-        vis_obs = obs["image"]
-
-        if done:
-            #print(f"rewards: {sum(self._rewards)}")
-            info = {"reward": sum(self._rewards),
-                    "length": len(self._rewards)}
-
-        return vis_obs, reward, done, info
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='SAC with 2 Q functions, Online updates')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
+    parser.add_argument('--gym-id', type=str, default="CartPole-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
@@ -110,7 +59,7 @@ if __name__ == "__main__":
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
-    parser.add_argument('--target-network-frequency', type=int, default=8000, # Denis Yarats' implementation delays this by 2.
+    parser.add_argument('--target-network-frequency', type=int, default=2, # Denis Yarats' implementation delays this by 2.
                         help="the timesteps it takes to update the target network")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
@@ -156,9 +105,7 @@ if args.prod_mode:
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 env = gym.make(args.gym_id)
-env = InfoWrapper(env)
-env = WrapFrame(env)
-env = wrap_pytorch(env)
+env = gym.wrappers.RecordEpisodeStatistics(env)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -195,34 +142,26 @@ class Policy(nn.Module):
         self.input_shape = input_shape
         self.num_actions = num_actions
 
-        c, w, h = self.input_shape
-
-        self.conv1 = nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0)
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0)
-
-
-        self.fc = nn.Linear(in_features=980, out_features=124)
-        self.logits = nn.Linear(in_features=124, out_features=self.num_actions)
+        self.network = nn.Sequential(
+            nn.Linear(4, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+        )
+        self.logits = nn.Linear(in_features=256, out_features=self.num_actions)
 
         for layer in self.modules():
-            if isinstance(layer, nn.Conv2d):
+            if isinstance(layer, nn.Linear):
                 nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
                 layer.bias.data.zero_()
 
-        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
-        self.fc.bias.data.zero_()
         nn.init.xavier_uniform_(self.logits.weight)
         self.logits.bias.data.zero_()
 
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
-        x = x
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.contiguous()
-        x = x.view(x.size(0), -1)
-        x = F.relu(self.fc(x))
+        x = self.network(x)
         logits = self.logits(x)
         probs = F.softmax(logits, -1)
         z = probs == 0.0
@@ -243,32 +182,27 @@ class SoftQNetwork(nn.Module):
         self.state_shape = input_shape
         self.n_actions = num_actions
 
-        c, w, h = self.state_shape
+        self.network = nn.Sequential(
+            nn.Linear(4, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+        )
 
-        self.conv1 = nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0)
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0)
-
-        self.fc = nn.Linear(in_features=980, out_features=124)
-        self.q_value = nn.Linear(in_features=124, out_features=self.n_actions)
+        self.q_value = nn.Linear(in_features=256, out_features=num_actions)
 
         for layer in self.modules():
-            if isinstance(layer, nn.Conv2d):
+            if isinstance(layer, nn.Linear):
                 nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
                 layer.bias.data.zero_()
 
-        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
-        self.fc.bias.data.zero_()
         nn.init.xavier_uniform_(self.q_value.weight)
         self.q_value.bias.data.zero_()
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
         x = x
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.contiguous()
-        x = x.view(x.size(0), -1)
-        x = F.relu(self.fc(x))
+        x = self.network(x)
         return self.q_value(x)
 
 
@@ -383,7 +317,6 @@ for global_step in range(1, args.total_timesteps+1):
 
         # update the target network
         if global_step % (args.target_network_frequency) == 0:
-            print(f"target update {global_step}")
             qf1_target.load_state_dict(qf1.state_dict())
             qf1_target.eval()
             qf2_target.load_state_dict(qf2.state_dict())
