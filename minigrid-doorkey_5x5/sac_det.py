@@ -174,8 +174,6 @@ if args.capture_video:
     env = Monitor(env, f'videos/{experiment_name}')
 
 # ALGO LOGIC: initialize agent here:
-LOG_STD_MAX = 2
-LOG_STD_MIN = -5
 
 def layer_init(layer, weight_gain=1, bias_const=0):
     if isinstance(layer, nn.Linear):
@@ -331,7 +329,6 @@ for global_step in range(1, args.total_timesteps+1):
     # TRY NOT TO MODIFY: execute the game and log data.
     dupa = 5 if action == 4 else action
     next_obs, reward, done, _ = env.step(dupa)
-    print(f"action {dupa} reward {reward}")
     if reward > 0:
         reward = 100
     #reward = np.sign(reward)
@@ -403,12 +400,11 @@ for global_step in range(1, args.total_timesteps+1):
             writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
     if done:
-        print(f"Episode reward {episode_reward}")
         global_episode += 1 # Outside the loop already means the epsiode is done
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/episode_length", episode_length, global_step)
         # Terminal verbosity
-        if global_episode % 10 == 0:
+        if global_episode % 1 == 0:
             print(f"Episode: {global_episode} Step: {global_step}, Ep. Reward: {episode_reward}")
 
         # Reseting what need to be

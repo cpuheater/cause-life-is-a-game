@@ -24,144 +24,67 @@ import cv2
 from gym_minigrid.wrappers import *
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
+import imageio
+from IPython.display import Video
 
-class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
-        # assign observation space
-        channel_num = 3
+class ImageToPyTorch(gym.ObservationWrapper):
+    """
+    Image shape to channels x weight x height
+    """
 
-        self.observation_shape = (channel_num, 64, 112)
-        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
-        self.reward_scale = reward_scale
-        game = DoomGame()
+    def __init__(self, env):
+        super(ImageToPyTorch, self).__init__(env)
+        old_shape = self.observation_space.shape
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(old_shape[-1], old_shape[0], old_shape[1]),
+            dtype=np.uint8,
+        )
 
-        game.load_config(f"./scenarios/{game_config}.cfg")
-        game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.CRCGCB)
+    def observation(self, observation):
+        return np.transpose(observation, axes=(2, 0, 1))
 
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
-        self.frame_skip = frame_skip
+def wrap_pytorch(env):
+    return ImageToPyTorch(env)
 
-        game.set_seed(seed)
-        game.set_window_visible(render)
-        game.init()
+class WrapFrame(gym.ObservationWrapper):
+    def __init__(self, env, width=84, height=84):
+        super().__init__(env)
+        self.observation_space = env.observation_space.spaces['image']
+        self.action_space = Discrete(5)
 
-        self.game = game
+    def observation(self, obs):
+        return obs
 
-    def get_current_input(self):
-        state = self.game.get_state()
-        res_source = []
-        res_source.append(state.screen_buffer)
-        res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
-        self.last_input = res
-        return res
+class InfoWrapper(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        self._rewards = []
+
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        self._rewards = []
+        return obs["image"]
 
     def step(self, action):
-        info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
-        done = self.game.is_episode_finished()
-        if done:
-            ob = self.last_input
-        else:
-            ob = self.get_current_input()
-        # reward scaling
-        reward = reward * self.reward_scale
-        self.total_reward += reward
-        self.total_length += 1
+        obs, reward, done, info = self.env.step(action)
+        self._rewards.append(reward)
+        vis_obs = obs["image"]
 
         if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
+            #print(f"rewards: {sum(self._rewards)}")
+            info = {"reward": sum(self._rewards),
+                    "length": len(self._rewards)}
 
-        return ob, reward, done, info
-
-    def reset(self):
-        self.game.new_episode()
-        self.total_reward = 0
-        self.total_length = 0
-        ob = self.get_current_input()
-        return ob
-
-    def close(self):
-        self.game.close()
-
-import random
-import torch
-import numpy as np
-from collections import namedtuple, deque
-
-
-class ReplayBufferNStep:
-    """Fixed-size buffer to store experience tuples."""
-
-    def __init__(self, buffer_size, batch_size, seed, gamma, n_step=1):
-        """Initialize a ReplayBuffer object.
-        Params
-        ======
-            buffer_size (int): maximum size of buffer
-            batch_size (int): size of each training batch
-            seed (int): random seed
-        """
-        self.device = device
-        self.memory = deque(maxlen=buffer_size)
-        self.batch_size = batch_size
-        self.n_step = n_step
-        self.parallel_env = 1
-        self.n_step_buffer = [deque(maxlen=self.n_step) for i in range(self.parallel_env)]
-        self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
-        self.seed = random.seed(seed)
-        self.gamma = gamma
-        self.iter_ = 0
-
-    def append(self, state, action, reward, next_state, done):
-        """Add a new experience to memory."""
-        if self.iter_ == self.parallel_env:
-            self.iter_ = 0
-        self.n_step_buffer[self.iter_].append((state, action, reward, next_state, done))
-        if len(self.n_step_buffer[self.iter_]) == self.n_step:
-            state, action, reward, next_state, done = self.calc_multistep_return(self.n_step_buffer[self.iter_])
-            e = self.experience(state, action, reward, next_state, done)
-            self.memory.append(e)
-        self.iter_ += 1
-
-    def calc_multistep_return(self, n_step_buffer):
-        Return = 0
-        for idx in range(self.n_step):
-            Return += self.gamma**idx * n_step_buffer[idx][2]
-
-        return n_step_buffer[0][0], n_step_buffer[0][1], Return, n_step_buffer[-1][3], n_step_buffer[-1][4]
-
-
-
-    def sample(self):
-        """Randomly sample a batch of experiences from memory."""
-        experiences = random.sample(self.memory, k=self.batch_size)
-
-        states = torch.from_numpy(np.stack([e.state for e in experiences if e is not None])).float()
-        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).float()
-        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float()
-        next_states = torch.from_numpy(np.stack([e.next_state for e in experiences if e is not None])).float()
-        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float()
-
-        return (states, actions, rewards, next_states, dones)
-
-    def __len__(self):
-        """Return the current size of internal memory."""
-        return len(self.memory)
-
+        return vis_obs, reward, done, info
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='SAC with 2 Q functions, Online updates')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="basic",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
@@ -238,7 +161,10 @@ if args.prod_mode:
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
-env = ViZDoomEnv(args.seed, args.gym_id, render=True, reward_scale=0.01, frame_skip=4)
+env = gym.make(args.gym_id)
+env = InfoWrapper(env)
+env = WrapFrame(env)
+env = wrap_pytorch(env)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -253,8 +179,6 @@ if args.capture_video:
     env = Monitor(env, f'videos/{experiment_name}')
 
 # ALGO LOGIC: initialize agent here:
-LOG_STD_MAX = 2
-LOG_STD_MIN = -5
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -262,36 +186,37 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Policy(nn.Module):
-    def __init__(self, num_actions):
+    def __init__(self, input_shape, num_actions):
         super(Policy, self).__init__()
+        self.input_shape = input_shape
         self.num_actions = num_actions
 
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(3, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
-            nn.ReLU()
-        )
-        self.logits = nn.Linear(in_features=512, out_features=self.num_actions)
+        c, w, h = self.input_shape
+
+        self.conv1 = nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0)
+        self.fc = nn.Linear(in_features=980, out_features=124)
+        self.logits = nn.Linear(in_features=124, out_features=self.num_actions)
 
         for layer in self.modules():
-            if isinstance(layer, nn.Linear):
+            if isinstance(layer, nn.Conv2d):
                 nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
                 layer.bias.data.zero_()
 
+        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
+        self.fc.bias.data.zero_()
         nn.init.xavier_uniform_(self.logits.weight)
         self.logits.bias.data.zero_()
 
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
-        x = x / 255.0
-        x = self.network(x)
+        x = x
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.contiguous()
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc(x))
         logits = self.logits(x)
         probs = F.softmax(logits, -1)
         z = probs == 0.0
@@ -305,68 +230,41 @@ class Policy(nn.Module):
         action = dist.sample()
         return action.detach().cpu().numpy()[0], dist
 
-
 class SoftQNetwork(nn.Module):
-    def __init__(self, num_actions):
+    def __init__(self, input_shape, num_actions):
         super(SoftQNetwork, self).__init__()
+        self.state_shape = input_shape
         self.n_actions = num_actions
 
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(3, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
-            nn.ReLU()
-        )
+        c, w, h = self.state_shape
 
-        self.q_value = nn.Linear(in_features=512, out_features=num_actions)
+        self.conv1 = nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0)
+
+        self.fc = nn.Linear(in_features=980, out_features=124)
+        self.q_value = nn.Linear(in_features=124, out_features=self.n_actions)
 
         for layer in self.modules():
-            if isinstance(layer, nn.Linear):
+            if isinstance(layer, nn.Conv2d):
                 nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
                 layer.bias.data.zero_()
 
+        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
+        self.fc.bias.data.zero_()
         nn.init.xavier_uniform_(self.q_value.weight)
         self.q_value.bias.data.zero_()
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
-        x = x / 255.0
-        x = self.network(x)
+        x = x
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.contiguous()
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc(x))
         return self.q_value(x)
 
-
-"""class ReplayBuffer():
- def __init__(self, buffer_limit):
-     self.buffer = collections.deque(maxlen=buffer_limit)
-
- def append(self, obs, action, reward, next_obs, done):
-     self.buffer.append((obs, action, reward, next_obs, done))
-
- def __len__(self):
-     return len(self.buffer)
-
- def sample(self, n):
-     mini_batch = random.sample(self.buffer, n)
-     s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
-
-     for transition in mini_batch:
-         s, a, r, s_prime, done_mask = transition
-         s_lst.append(s)
-         a_lst.append(a)
-         r_lst.append(r)
-         s_prime_lst.append(s_prime)
-         done_mask_lst.append(done_mask)
-
-     return np.array(s_lst), np.array(a_lst), \
-            np.array(r_lst), np.array(s_prime_lst), \
-            np.array(done_mask_lst)"""
-
-class ReplayBufferNStep2(object):
+class ReplayBufferNStep(object):
     def __init__(self, size, n_step, gamma):
         self._storage = deque(maxlen=size)
         self._maxsize = size
@@ -405,19 +303,13 @@ class ReplayBufferNStep2(object):
             dones.append(done)
         return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
-rb=ReplayBufferNStep2(args.buffer_size, 4, args.gamma)
+rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
 
-#rb = ReplayBuffer(args.buffer_size,
-#                  args.batch_size,
-#                  args.seed,
-#                  args.gamma,
-#                  n_step=args.n_step)
-
-pg = Policy(env.action_space.n).to(device)
-qf1 = SoftQNetwork(env.action_space.n).to(device)
-qf2 = SoftQNetwork(env.action_space.n).to(device)
-qf1_target = SoftQNetwork(env.action_space.n).to(device)
-qf2_target = SoftQNetwork(env.action_space.n).to(device)
+pg = Policy(input_shape, env.action_space.n).to(device)
+qf1 = SoftQNetwork(input_shape, env.action_space.n).to(device)
+qf2 = SoftQNetwork(input_shape, env.action_space.n).to(device)
+qf1_target = SoftQNetwork(input_shape, env.action_space.n).to(device)
+qf2_target = SoftQNetwork(input_shape, env.action_space.n).to(device)
 qf1_target.eval()
 qf2_target.eval()
 qf1_target.load_state_dict(qf1.state_dict())
@@ -440,7 +332,7 @@ global_episode = 0
 obs, done = env.reset(), False
 episode_reward, episode_length= 0.,0
 max_episode_reward = -np.inf
-
+renders = []
 for global_step in range(1, args.total_timesteps+1):
     # ALGO LOGIC: put action logic here
     if global_step < args.learning_starts:
@@ -449,6 +341,8 @@ for global_step in range(1, args.total_timesteps+1):
         action, _ = pg.get_action([obs], device)
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, _ = env.step(action)
+
+    renders.append(env.render(mode='rgb_array'))
     reward = 100 if reward > 0 else reward
     rb.append(obs, action, reward, next_obs, done)
     episode_reward += reward
@@ -528,6 +422,11 @@ for global_step in range(1, args.total_timesteps+1):
         # Reseting what need to be
         obs, done = env.reset(), False
         episode_reward, episode_length = 0., 0
+    if global_episode % 2000 == 0:
+        renders = np.stack(renders)
+        imageio.mimwrite(f'test-{global_step}.mp4', renders, fps=15)
+        renders = []
+
 
 writer.close()
 env.close()
