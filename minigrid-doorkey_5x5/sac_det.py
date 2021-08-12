@@ -21,6 +21,7 @@ import random
 import os
 from collections import deque
 import cv2
+import imageio
 from gym_minigrid.wrappers import *
 
 class ImageToPyTorch(gym.ObservationWrapper):
@@ -318,8 +319,7 @@ else:
 global_episode = 0
 obs, done = env.reset(), False
 episode_reward, episode_length= 0.,0
-
-
+renders = []
 for global_step in range(1, args.total_timesteps+1):
     # ALGO LOGIC: put action logic here
     if global_step < args.learning_starts:
@@ -329,6 +329,7 @@ for global_step in range(1, args.total_timesteps+1):
     # TRY NOT TO MODIFY: execute the game and log data.
     dupa = 5 if action == 4 else action
     next_obs, reward, done, _ = env.step(dupa)
+    renders.append(env.render(mode='rgb_array'))
     if reward > 0:
         reward = 100
     #reward = np.sign(reward)
@@ -410,6 +411,11 @@ for global_step in range(1, args.total_timesteps+1):
         # Reseting what need to be
         obs, done = env.reset(), False
         episode_reward, episode_length = 0., 0
+
+    if global_step % 1999 == 0:
+        renders = np.stack(renders)
+        imageio.mimwrite(f'test-{global_step}.mp4', renders, fps=15)
+        renders = []
 
 writer.close()
 env.close()
