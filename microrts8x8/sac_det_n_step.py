@@ -1,134 +1,93 @@
-    # https://github.com/pranz24/pytorch-soft-actor-critic
+# https://github.com/pranz24/pytorch-soft-actor-critic
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
+from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
+from gym import spaces
 import argparse
 from distutils.util import strtobool
 import collections
 import numpy as np
 import gym
 from gym.wrappers import TimeLimit, Monitor
-import time
-import random
-import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from torch.distributions.categorical import Categorical
-from torch.utils.tensorboard import SummaryWriter
-
-import argparse
-from distutils.util import strtobool
-import numpy as np
-import gym
-import gym_microrts
-from gym.wrappers import TimeLimit, Monitor
-from gym_microrts.envs.vec_env import MicroRTSGridModeVecEnv
-from gym_microrts import microrts_ai
+import pybullet_envs
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
-from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+from collections import deque
+import cv2
+from gym_minigrid.wrappers import *
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
+import skimage.transform
+import imageio
+from IPython.display import Video
+from collections import Counter
 
+class ImageToPyTorch(gym.ObservationWrapper):
+    """
+    Image shape to channels x weight x height
+    """
 
-class ReplayBuffer():
-    def __init__(self, buffer_limit):
-        self.buffer = collections.deque(maxlen=buffer_limit)
+    def __init__(self, env):
+        super(ImageToPyTorch, self).__init__(env)
+        old_shape = self.observation_space.shape
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(old_shape[-1], old_shape[0], old_shape[1]),
+            dtype=np.uint8,
+        )
 
-    def put(self, transition):
-        self.buffer.append(transition)
+    def observation(self, observation):
+        return np.transpose(observation, axes=(2, 0, 1))
 
-    def sample(self, n):
-        mini_batch = random.sample(self.buffer, n)
-        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
+def wrap_pytorch(env):
+    return ImageToPyTorch(env)
 
-        for transition in mini_batch:
-            s, a, r, s_prime, done_mask = transition
-            s_lst.append(s)
-            a_lst.append(a)
-            r_lst.append(r)
-            s_prime_lst.append(s_prime)
-            done_mask_lst.append(done_mask)
-
-        return np.array(s_lst), np.array(a_lst), \
-               np.array(r_lst), np.array(s_prime_lst), \
-               np.array(done_mask_lst)
-
-
-
-class VecMonitor(VecEnvWrapper):
-    def __init__(self, venv):
-        VecEnvWrapper.__init__(self, venv)
-        self.eprets = None
-        self.eplens = None
-        self.epcount = 0
-        self.tstart = time.time()
-
-    def reset(self):
-        obs = self.venv.reset()
-        self.eprets = np.zeros(self.num_envs, 'f')
-        self.eplens = np.zeros(self.num_envs, 'i')
-        return obs
-
-    def step_wait(self):
-        obs, rews, dones, infos = self.venv.step_wait()
-        self.eprets += rews
-        self.eplens += 1
-
-        newinfos = list(infos[:])
-        for i in range(len(dones)):
-            if dones[i]:
-                info = infos[i].copy()
-                ret = self.eprets[i]
-                eplen = self.eplens[i]
-                epinfo = {'r': ret, 'l': eplen, 't': round(time.time() - self.tstart, 6)}
-                info['episode'] = epinfo
-                self.epcount += 1
-                self.eprets[i] = 0
-                self.eplens[i] = 0
-                newinfos[i] = info
-        return obs, rews, dones, newinfos
-
-class MicroRTSStatsRecorder(VecEnvWrapper):
-    def __init__(self, env, gamma):
+class WrapFrame(gym.ObservationWrapper):
+    def __init__(self, env, width=84, height=84):
         super().__init__(env)
-        self.gamma = gamma
+        self.observation_space = env.observation_space.spaces['image']
+        self.action_space = Discrete(5)
 
-    def reset(self):
-        obs = self.venv.reset()
-        self.raw_rewards = [[] for _ in range(self.num_envs)]
+    def observation(self, obs):
         return obs
 
-    def step_wait(self):
-        obs, rews, dones, infos = self.venv.step_wait()
-        for i in range(len(dones)):
-            self.raw_rewards[i] += [infos[i]["raw_rewards"]]
-        newinfos = list(infos[:])
-        for i in range(len(dones)):
-            if dones[i]:
-                info = infos[i].copy()
-                raw_rewards = np.array(self.raw_rewards[i]).sum(0)
-                raw_names = [str(rf) for rf in self.rfs]
-                info['microrts_stats'] = dict(zip(raw_names, raw_rewards))
-                self.raw_rewards[i] = []
-                newinfos[i] = info
-        return obs, rews, dones, newinfos
+class InfoWrapper(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        self._rewards = []
 
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        self._rewards = []
+        return obs["image"]
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        self._rewards.append(reward)
+        vis_obs = obs["image"]
+
+        if done:
+            #print(f"rewards: {sum(self._rewards)}")
+            info = {"reward": sum(self._rewards),
+                    "length": len(self._rewards)}
+
+        return vis_obs, reward, done, info
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='SAC with 2 Q functions, Online updates')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts8-workerRushAI",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=2,
                         help='seed of the experiment')
@@ -150,13 +109,9 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='automatic tuning of the entropy coefficient.')
-    parser.add_argument('--num-bot-envs', type=int, default=1,
-                        help='the number of bot game environment; 16 bot envs measn 16 games')
-    parser.add_argument('--num-selfplay-envs', type=int, default=0,
-                        help='the number of self play envs; 16 self play envs means 8 games')
 
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=135000,
+    parser.add_argument('--buffer-size', type=int, default=100000,
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -170,15 +125,17 @@ if __name__ == "__main__":
                         help="target smoothing coefficient (default: 0.005)")
     parser.add_argument('--alpha', type=float, default=0.2,
                         help="Entropy regularization coefficient.")
-    parser.add_argument('--learning-starts', type=int, default=5e1,
+    parser.add_argument('--learning-starts', type=int, default=1e1,
                         help="timestep to start learning")
+    parser.add_argument('--n-step', type=int, default=3,
+                        help="n step")
 
 
     # Additional hyper parameters for tweaks
     ## Separating the learning rate of the policy and value commonly seen: (Original implementation, Denis Yarats)
-    parser.add_argument('--policy-lr', type=float, default=4.5e-4,
+    parser.add_argument('--policy-lr', type=float, default=2e-4,
                         help='the learning rate of the policy network optimizer')
-    parser.add_argument('--q-lr', type=float, default=4.5e-4,
+    parser.add_argument('--q-lr', type=float, default=2e-4,
                         help='the learning rate of the Q network network optimizer')
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')
@@ -193,92 +150,74 @@ if __name__ == "__main__":
     args.seed = int(time.time())
 
 # TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+experiment_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
     '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
-
-    run = wandb.init(
-        project=args.wandb_project_name, entity=args.wandb_entity,
-        # sync_tensorboard=True,
-        config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
-    wandb.tensorboard.patch(save=False)
+    wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
     writer = SummaryWriter(f"/tmp/{experiment_name}")
 
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
+env = gym.make(args.gym_id)
+env = InfoWrapper(env)
+env = WrapFrame(env)
+env = wrap_pytorch(env)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-env = MicroRTSGridModeVecEnv(
-    num_selfplay_envs=args.num_selfplay_envs,
-    num_bot_envs=args.num_bot_envs,
-    max_steps=1200,
-    render_theme=2,
-    ai2s=[microrts_ai.coacAI for _ in range(args.num_bot_envs)],
-    map_path="maps/8x8/basesWorkers8x8.xml",
-    reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
-)
-env = MicroRTSStatsRecorder(env, args.gamma)
-env = VecMonitor(env)
-mapsize=8*8
+env.action_space.seed(args.seed)
+env.observation_space.seed(args.seed)
+input_shape = env.observation_space.shape
+output_shape = env.action_space.shape
 # respect the default timelimit
 
 if args.capture_video:
-    envs = VecVideoRecorder(env, f'videos/{experiment_name}',
-                            record_video_trigger=lambda x: x % 10000000 == 0, video_length=2000)
+    env = Monitor(env, f'videos/{experiment_name}')
 
 # ALGO LOGIC: initialize agent here:
-class CategoricalMasked(Categorical):
-    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
-        self.masks = masks
-        if len(self.masks) == 0:
-            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-        else:
-            self.masks = masks.bool()
-            logits = torch.where(self.masks, logits, torch.tensor(-1e+8, device=device))
-            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-
-    def entropy(self):
-        if len(self.masks) == 0:
-            return super(CategoricalMasked, self).entropy()
-        p_log_p = self.logits * self.probs
-        p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
-        return -p_log_p.sum(-1)
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-def conv_shape(input, kernel_size, stride, padding=0):
-    return (input + 2 * padding - kernel_size) // stride + 1
-
-
 class Policy(nn.Module):
-    def __init__(self, mapsize=8*8):
+    def __init__(self, input_shape, num_actions):
         super(Policy, self).__init__()
-        self.mapsize = mapsize
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU())
-        self.logits = nn.Linear(128, self.mapsize * env.action_space.nvec[1:].sum())
+        self.input_shape = input_shape
+        self.num_actions = num_actions
 
+        c, w, h = self.input_shape
+
+        self.conv1 = nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0)
+        self.fc = nn.Linear(in_features=980, out_features=124)
+        self.logits = nn.Linear(in_features=124, out_features=self.num_actions)
+
+        for layer in self.modules():
+            if isinstance(layer, nn.Conv2d):
+                nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
+                layer.bias.data.zero_()
+
+        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
+        self.fc.bias.data.zero_()
         nn.init.xavier_uniform_(self.logits.weight)
         self.logits.bias.data.zero_()
 
+
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
-        x = self.network(x.permute(0, 3, 1, 2))
+        x = x
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.contiguous()
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc(x))
         logits = self.logits(x)
         probs = F.softmax(logits, -1)
         z = probs == 0.0
@@ -286,78 +225,92 @@ class Policy(nn.Module):
         log_probs = torch.log(probs + z)
         return probs, log_probs
 
-    def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
-        logits, _ = self.forward(x)
-        grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
-        split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
-
-        if action is None:
-            invalid_action_masks = torch.tensor(np.array(envs.vec_client.getMasks(0))).to(device)
-            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
-                                                     dim=1)
-            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
-                                  zip(split_logits, split_invalid_action_masks)]
-            action = torch.stack([categorical.sample() for categorical in multi_categoricals])
-        else:
-            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            action = action.view(-1, action.shape[-1]).T
-            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
-                                                     dim=1)
-            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
-                                  zip(split_logits, split_invalid_action_masks)]
-        logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
-        entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
-        num_predicted_parameters = len(envs.action_space.nvec) - 1
-        logprob = logprob.T.view(-1, 64, num_predicted_parameters)
-        entropy = entropy.T.view(-1, 64, num_predicted_parameters)
-        action = action.T.view(-1, 64, num_predicted_parameters)
-        invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
-        return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
-
-
-
-    #def get_action(self, x, device):
-    #    probs, log_probs = self.forward(x, device)
-    #    dist = Categorical(probs)
-    #    action = dist.sample()
-    #    return action.detach().cpu().numpy()[0], dist
-
+    def get_action(self, x, device):
+        probs, log_probs = self.forward(x, device)
+        dist = Categorical(probs)
+        action = dist.sample()
+        return action.detach().cpu().numpy()[0], dist
 
 class SoftQNetwork(nn.Module):
-    def __init__(self, mapsize=8*8):
+    def __init__(self, input_shape, num_actions):
         super(SoftQNetwork, self).__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU())
+        self.state_shape = input_shape
+        self.n_actions = num_actions
 
-        self.q_value = nn.Linear(128, mapsize * env.action_space.nvec[1:].sum())
+        c, w, h = self.state_shape
+
+        self.conv1 = nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0)
+
+        self.fc = nn.Linear(in_features=980, out_features=124)
+        self.q_value = nn.Linear(in_features=124, out_features=self.n_actions)
 
         for layer in self.modules():
             if isinstance(layer, nn.Conv2d):
                 nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
                 layer.bias.data.zero_()
 
+        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
+        self.fc.bias.data.zero_()
         nn.init.xavier_uniform_(self.q_value.weight)
         self.q_value.bias.data.zero_()
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
-        x = self.network(x)
+        x = x
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.contiguous()
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc(x))
         return self.q_value(x)
 
+class ReplayBufferNStep(object):
+    def __init__(self, size, n_step, gamma):
+        self._storage = deque(maxlen=size)
+        self._maxsize = size
+        self.n_step_buffer = deque(maxlen=n_step)
+        self.gamma = gamma
+        self.n_step = n_step
 
-rb = ReplayBuffer(args.buffer_size)
-pg = Policy().to(device)
-qf1 = SoftQNetwork().to(device)
-qf2 = SoftQNetwork().to(device)
-qf1_target = SoftQNetwork().to(device)
-qf2_target = SoftQNetwork().to(device)
+    def __len__(self):
+        return len(self._storage)
+
+    def get_n_step(self):
+        _, _, reward, next_observation, done = self.n_step_buffer[-1]
+        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
+            reward = self.gamma * reward * (1 - do) + r
+            mext_observation, done = (next_obs, do) if do else (next_observation, done)
+        return reward, next_observation, done
+
+    def append(self, obs, action, reward, next_obs, done):
+        self.n_step_buffer.append((obs, action, reward, next_obs, done))
+        if len(self.n_step_buffer) < self.n_step:
+            return
+        reward, next_obs, done = self.get_n_step()
+        obs, action, _, _, _ = self.n_step_buffer[0]
+        self._storage.append([obs, action, reward, next_obs, done])
+
+    def sample(self, batch_size):
+        idxes = np.random.choice(len(self._storage), batch_size, replace=True)
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, reward, obs_tp1, done = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1, copy=False))
+            dones.append(done)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
+
+rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
+
+pg = Policy(input_shape, env.action_space.n).to(device)
+qf1 = SoftQNetwork(input_shape, env.action_space.n).to(device)
+qf2 = SoftQNetwork(input_shape, env.action_space.n).to(device)
+qf1_target = SoftQNetwork(input_shape, env.action_space.n).to(device)
+qf2_target = SoftQNetwork(input_shape, env.action_space.n).to(device)
 qf1_target.eval()
 qf2_target.eval()
 qf1_target.load_state_dict(qf1.state_dict())
@@ -368,7 +321,7 @@ loss_fn = nn.MSELoss()
 
 # Automatic entropy tuning
 if args.autotune:
-    target_entropy = 0.98 * (-np.log(1 / mapsize * env.action_space.nvec[1:].sum()))
+    target_entropy = 0.98 * (-np.log(1 / env.action_space.n))
     log_alpha = torch.zeros(1, requires_grad=True, device=device)
     alpha = log_alpha.exp().item()
     a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
@@ -380,32 +333,30 @@ global_episode = 0
 obs, done = env.reset(), False
 episode_reward, episode_length= 0.,0
 max_episode_reward = -np.inf
-
 for global_step in range(1, args.total_timesteps+1):
     # ALGO LOGIC: put action logic here
     if global_step < args.learning_starts:
         action = env.action_space.sample()
     else:
-        action, _, _, invalid_action_masks = pg.get_action(obs, env)
+        action, _ = pg.get_action([obs], device)
     # TRY NOT TO MODIFY: execute the game and log data.
-    next_obs, reward, done, _ = env.step(action)
-    if done and reward <= 0:
-        reward = -1
-    #reward = np.sign(reward)
-    rb.put((obs, action, reward, next_obs, done))
+    next_obs, reward, done, _ = env.step(5 if action == 4 else action)
+
+    reward = 100 if reward > 0 else reward
+    rb.append(obs, action, reward, next_obs, done)
     episode_reward += reward
     episode_length += 1
     obs = np.array(next_obs)
 
     # ALGO LOGIC: training.
-    if len(rb.buffer) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
+    if len(rb) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
             probs, next_state_log_probs = pg.forward(s_next_obses, device)
             qf1_next_target = qf1_target.forward(s_next_obses, device)
             qf2_next_target = qf2_target.forward(s_next_obses, device)
             min_qf_next_target = (probs * (torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_probs)).sum(-1)
-            next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * args.gamma * min_qf_next_target
+            next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * min_qf_next_target
 
         qf1_a_values = qf1.forward(s_obs,  device)[np.arange(args.batch_size), np.array(s_actions)]
         qf2_a_values = qf2.forward(s_obs,  device)[np.arange(args.batch_size), np.array(s_actions)]
@@ -450,7 +401,7 @@ for global_step in range(1, args.total_timesteps+1):
             #for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
             #    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
-    if len(rb.buffer) > args.batch_size and global_step % 100 == 0:
+    if len(rb) > args.batch_size and global_step % 100 == 0:
         writer.add_scalar("losses/soft_q_value_1_loss", qf1_loss.item(), global_step)
         writer.add_scalar("losses/soft_q_value_2_loss", qf2_loss.item(), global_step)
         writer.add_scalar("losses/qf_loss", qf_loss.item(), global_step)
@@ -460,19 +411,17 @@ for global_step in range(1, args.total_timesteps+1):
             writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
     if done:
-        print(f"Episode reward {episode_reward}")
         global_episode += 1 # Outside the loop already means the epsiode is done
-        max_episode_reward = max(max_episode_reward, episode_reward)
-        writer.add_scalar("charts/max_episode_reward", max_episode_reward, global_step)
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/episode_length", episode_length, global_step)
         # Terminal verbosity
-        if global_episode % 10 == 0:
+        if global_episode % 1 == 0:
             print(f"Episode: {global_episode} Step: {global_step}, Ep. Reward: {episode_reward}")
 
         # Reseting what need to be
         obs, done = env.reset(), False
         episode_reward, episode_length = 0., 0
+
 
 writer.close()
 env.close()

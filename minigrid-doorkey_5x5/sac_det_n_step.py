@@ -333,7 +333,6 @@ global_episode = 0
 obs, done = env.reset(), False
 episode_reward, episode_length= 0.,0
 max_episode_reward = -np.inf
-renders = []
 for global_step in range(1, args.total_timesteps+1):
     # ALGO LOGIC: put action logic here
     if global_step < args.learning_starts:
@@ -343,7 +342,6 @@ for global_step in range(1, args.total_timesteps+1):
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, _ = env.step(5 if action == 4 else action)
 
-    renders.append(env.render(mode='rgb_array'))
     reward = 100 if reward > 0 else reward
     rb.append(obs, action, reward, next_obs, done)
     episode_reward += reward
@@ -423,10 +421,6 @@ for global_step in range(1, args.total_timesteps+1):
         # Reseting what need to be
         obs, done = env.reset(), False
         episode_reward, episode_length = 0., 0
-    if global_step % 1999 == 0:
-        renders = np.stack(renders)
-        imageio.mimwrite(f'test-{global_step}.mp4', renders, fps=15)
-        renders = []
 
 
 writer.close()
