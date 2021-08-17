@@ -10,75 +10,85 @@ from torch.utils.tensorboard import SummaryWriter
 from gym import spaces
 import argparse
 from distutils.util import strtobool
-import collections
 import numpy as np
 import gym
 from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
 from collections import deque
-import cv2
-from gym_minigrid.wrappers import *
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-import skimage.transform
-import imageio
-from IPython.display import Video
-from collections import Counter
+from distutils.util import strtobool
+import numpy as np
+import gym
+import gym_microrts
+from gym.wrappers import TimeLimit, Monitor
+from gym_microrts.envs.vec_env import MicroRTSGridModeVecEnv
+from gym_microrts import microrts_ai
+from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
+import time
+import random
+import os
+from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+from jpype.types import JArray, JInt
 
-class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
+class VecMonitor(VecEnvWrapper):
+    def __init__(self, venv):
+        VecEnvWrapper.__init__(self, venv)
+        self.eprets = None
+        self.eplens = None
+        self.epcount = 0
+        self.tstart = time.time()
 
-    def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.uint8,
-        )
-
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
-
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
-
-class WrapFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84):
-        super().__init__(env)
-        self.observation_space = env.observation_space.spaces['image']
-        self.action_space = Discrete(5)
-
-    def observation(self, obs):
+    def reset(self):
+        obs = self.venv.reset()
+        self.eprets = np.zeros(self.num_envs, 'f')
+        self.eplens = np.zeros(self.num_envs, 'i')
         return obs
 
-class InfoWrapper(gym.Wrapper):
-    def __init__(self, env):
-        gym.Wrapper.__init__(self, env)
-        self._rewards = []
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        self.eprets += rews
+        self.eplens += 1
 
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        self._rewards = []
-        return obs["image"]
+        newinfos = list(infos[:])
+        for i in range(len(dones)):
+            if dones[i]:
+                info = infos[i].copy()
+                ret = self.eprets[i]
+                eplen = self.eplens[i]
+                epinfo = {'r': ret, 'l': eplen, 't': round(time.time() - self.tstart, 6)}
+                info['episode'] = epinfo
+                self.epcount += 1
+                self.eprets[i] = 0
+                self.eplens[i] = 0
+                newinfos[i] = info
+        return obs, rews, dones, newinfos
 
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self._rewards.append(reward)
-        vis_obs = obs["image"]
+class MicroRTSStatsRecorder(VecEnvWrapper):
+    def __init__(self, env, gamma):
+        super().__init__(env)
+        self.gamma = gamma
 
-        if done:
-            #print(f"rewards: {sum(self._rewards)}")
-            info = {"reward": sum(self._rewards),
-                    "length": len(self._rewards)}
+    def reset(self):
+        obs = self.venv.reset()
+        self.raw_rewards = [[] for _ in range(self.num_envs)]
+        return obs
 
-        return vis_obs, reward, done, info
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        for i in range(len(dones)):
+            self.raw_rewards[i] += [infos[i]["raw_rewards"]]
+        newinfos = list(infos[:])
+        for i in range(len(dones)):
+            if dones[i]:
+                info = infos[i].copy()
+                raw_rewards = np.array(self.raw_rewards[i]).sum(0)
+                raw_names = [str(rf) for rf in self.rfs]
+                info['microrts_stats'] = dict(zip(raw_names, raw_rewards))
+                self.raw_rewards[i] = []
+                newinfos[i] = info
+        return obs, rews, dones, newinfos
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='SAC with 2 Q functions, Online updates')
@@ -125,10 +135,14 @@ if __name__ == "__main__":
                         help="target smoothing coefficient (default: 0.005)")
     parser.add_argument('--alpha', type=float, default=0.2,
                         help="Entropy regularization coefficient.")
-    parser.add_argument('--learning-starts', type=int, default=1e1,
+    parser.add_argument('--learning-starts', type=int, default=0,
                         help="timestep to start learning")
     parser.add_argument('--n-step', type=int, default=3,
                         help="n step")
+    parser.add_argument('--num-bot-envs', type=int, default=1,
+                        help='the number of bot game environment; 16 bot envs measn 16 games')
+    parser.add_argument('--num-selfplay-envs', type=int, default=0,
+                        help='the number of self play envs; 16 self play envs means 8 games')
 
 
     # Additional hyper parameters for tweaks
@@ -162,10 +176,18 @@ if args.prod_mode:
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
-env = gym.make(args.gym_id)
-env = InfoWrapper(env)
-env = WrapFrame(env)
-env = wrap_pytorch(env)
+env = MicroRTSGridModeVecEnv(
+    num_selfplay_envs=args.num_selfplay_envs,
+    num_bot_envs=args.num_bot_envs,
+    max_steps=1200,
+    render_theme=2,
+    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
+    map_path="maps/8x8/basesWorkers8x8.xml",
+    reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
+)
+mapsize=8*8
+env = MicroRTSStatsRecorder(env, args.gamma)
+env = VecMonitor(env)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -180,6 +202,22 @@ if args.capture_video:
     env = Monitor(env, f'videos/{experiment_name}')
 
 # ALGO LOGIC: initialize agent here:
+class CategoricalMasked(Categorical):
+    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
+        self.masks = masks
+        if len(self.masks) == 0:
+            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
+        else:
+            self.masks = masks.bool()
+            logits = torch.where(self.masks, logits, torch.tensor(-1e+8, device=device))
+            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
+
+    def entropy(self):
+        if len(self.masks) == 0:
+            return super(CategoricalMasked, self).entropy()
+        p_log_p = self.logits * self.probs
+        p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
+        return -p_log_p.sum(-1)
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -187,37 +225,23 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Policy(nn.Module):
-    def __init__(self, input_shape, num_actions):
+    def __init__(self, mapsize=8*8):
         super(Policy, self).__init__()
-        self.input_shape = input_shape
-        self.num_actions = num_actions
+        self.mapsize = mapsize
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU())
 
-        c, w, h = self.input_shape
+        self.logits = layer_init(nn.Linear(128, self.mapsize * env.action_space.nvec[1:].sum()), std=1)
 
-        self.conv1 = nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0)
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0)
-        self.fc = nn.Linear(in_features=980, out_features=124)
-        self.logits = nn.Linear(in_features=124, out_features=self.num_actions)
-
-        for layer in self.modules():
-            if isinstance(layer, nn.Conv2d):
-                nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
-                layer.bias.data.zero_()
-
-        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
-        self.fc.bias.data.zero_()
-        nn.init.xavier_uniform_(self.logits.weight)
-        self.logits.bias.data.zero_()
-
-
-    def forward(self, x, device):
+    def forward(self, x):
         x = torch.Tensor(x).to(device)
-        x = x
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.contiguous()
-        x = x.view(x.size(0), -1)
-        x = F.relu(self.fc(x))
+        x = self.network(x.permute((0, 3, 1, 2)))
         logits = self.logits(x)
         probs = F.softmax(logits, -1)
         z = probs == 0.0
@@ -225,44 +249,57 @@ class Policy(nn.Module):
         log_probs = torch.log(probs + z)
         return probs, log_probs
 
-    def get_action(self, x, device):
-        probs, log_probs = self.forward(x, device)
-        dist = Categorical(probs)
-        action = dist.sample()
-        return action.detach().cpu().numpy()[0], dist
+    def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
+        logits, _ = self.forward(x)
+        grid_logits = logits.view(-1, env.action_space.nvec[1:].sum())
+        split_logits = torch.split(grid_logits, env.action_space.nvec[1:].tolist(), dim=1)
+
+        if action is None:
+            invalid_action_masks = torch.tensor(np.array(envs.vec_client.getMasks(0))).to(device)
+            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
+            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
+                                                     dim=1)
+            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
+                                  zip(split_logits, split_invalid_action_masks)]
+            action = torch.stack([categorical.sample() for categorical in multi_categoricals])
+        else:
+            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
+            action = action.view(-1, action.shape[-1]).T
+            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
+                                                     dim=1)
+            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
+                                  zip(split_logits, split_invalid_action_masks)]
+        logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
+        entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
+        num_predicted_parameters = len(envs.action_space.nvec) - 1
+        logprob = logprob.T.view(-1, 64, num_predicted_parameters)
+        entropy = entropy.T.view(-1, 64, num_predicted_parameters)
+        action = action.T.view(-1, 64, num_predicted_parameters)
+        invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
+        return action, invalid_action_masks
+        #probs, log_probs = self.forward(x, device)
+        #dist = Categorical(probs)
+        #action = dist.sample()
+        #return action.detach().cpu().numpy()[0], dist
 
 class SoftQNetwork(nn.Module):
-    def __init__(self, input_shape, num_actions):
+    def __init__(self, mapsize=8 * 8):
         super(SoftQNetwork, self).__init__()
-        self.state_shape = input_shape
-        self.n_actions = num_actions
 
-        c, w, h = self.state_shape
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU())
 
-        self.conv1 = nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0)
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0)
+        self.q_value = layer_init(nn.Linear(128, mapsize * env.action_space.nvec[1:].sum()), std=1)
 
-        self.fc = nn.Linear(in_features=980, out_features=124)
-        self.q_value = nn.Linear(in_features=124, out_features=self.n_actions)
-
-        for layer in self.modules():
-            if isinstance(layer, nn.Conv2d):
-                nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
-                layer.bias.data.zero_()
-
-        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
-        self.fc.bias.data.zero_()
-        nn.init.xavier_uniform_(self.q_value.weight)
-        self.q_value.bias.data.zero_()
-
-    def forward(self, x, device):
+    def forward(self, x):
         x = torch.Tensor(x).to(device)
-        x = x
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.contiguous()
-        x = x.view(x.size(0), -1)
-        x = F.relu(self.fc(x))
+        x = self.network(x.permute((0, 3, 1, 2)))
         return self.q_value(x)
 
 class ReplayBufferNStep(object):
@@ -277,40 +314,41 @@ class ReplayBufferNStep(object):
         return len(self._storage)
 
     def get_n_step(self):
-        _, _, reward, next_observation, done = self.n_step_buffer[-1]
-        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
+        _, _, reward, next_observation, done, invalid_action_mask = self.n_step_buffer[-1]
+        for _, _, r, next_obs, do, invalid_action_mask in reversed(list(self.n_step_buffer)[:-1]):
             reward = self.gamma * reward * (1 - do) + r
             mext_observation, done = (next_obs, do) if do else (next_observation, done)
         return reward, next_observation, done
 
-    def append(self, obs, action, reward, next_obs, done):
-        self.n_step_buffer.append((obs, action, reward, next_obs, done))
+    def append(self, obs, action, reward, next_obs, done, invalid_action_mask):
+        self.n_step_buffer.append((obs, action, reward, next_obs, done, invalid_action_mask))
         if len(self.n_step_buffer) < self.n_step:
             return
         reward, next_obs, done = self.get_n_step()
-        obs, action, _, _, _ = self.n_step_buffer[0]
-        self._storage.append([obs, action, reward, next_obs, done])
+        obs, action, _, _, _, invalid_action_mask = self.n_step_buffer[0]
+        self._storage.append([obs, action, reward, next_obs, done, invalid_action_mask])
 
     def sample(self, batch_size):
         idxes = np.random.choice(len(self._storage), batch_size, replace=True)
-        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        obses_t, actions, rewards, obses_tp1, dones, invalid_action_masks = [], [], [], [], [], []
         for i in idxes:
             data = self._storage[i]
-            obs_t, action, reward, obs_tp1, done = data
+            obs_t, action, reward, obs_tp1, done, invalid_action_mask = data
             obses_t.append(np.array(obs_t, copy=False))
             actions.append(np.array(action, copy=False))
             rewards.append(reward)
             obses_tp1.append(np.array(obs_tp1, copy=False))
             dones.append(done)
-        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
+            invalid_action_masks.append(invalid_action_mask)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones), np.array(invalid_action_masks)
 
 rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
 
-pg = Policy(input_shape, env.action_space.n).to(device)
-qf1 = SoftQNetwork(input_shape, env.action_space.n).to(device)
-qf2 = SoftQNetwork(input_shape, env.action_space.n).to(device)
-qf1_target = SoftQNetwork(input_shape, env.action_space.n).to(device)
-qf2_target = SoftQNetwork(input_shape, env.action_space.n).to(device)
+pg = Policy().to(device)
+qf1 = SoftQNetwork().to(device)
+qf2 = SoftQNetwork().to(device)
+qf1_target = SoftQNetwork().to(device)
+qf2_target = SoftQNetwork().to(device)
 qf1_target.eval()
 qf2_target.eval()
 qf1_target.load_state_dict(qf1.state_dict())
@@ -321,7 +359,7 @@ loss_fn = nn.MSELoss()
 
 # Automatic entropy tuning
 if args.autotune:
-    target_entropy = 0.98 * (-np.log(1 / env.action_space.n))
+    target_entropy = 0.98 * (-np.log(1 / 8*8 * env.action_space.nvec[1:].sum()))
     log_alpha = torch.zeros(1, requires_grad=True, device=device)
     alpha = log_alpha.exp().item()
     a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
@@ -335,33 +373,82 @@ episode_reward, episode_length= 0.,0
 max_episode_reward = -np.inf
 for global_step in range(1, args.total_timesteps+1):
     # ALGO LOGIC: put action logic here
-    if global_step < args.learning_starts:
-        action = env.action_space.sample()
-    else:
-        action, _ = pg.get_action([obs], device)
+    env.render()
+    action, invalid_action_mask = pg.get_action(obs, envs=env)
     # TRY NOT TO MODIFY: execute the game and log data.
-    next_obs, reward, done, _ = env.step(5 if action == 4 else action)
+    real_action = torch.cat([
+        torch.stack(
+            [torch.arange(0, mapsize, device=device) for i in range(env.num_envs)
+             ]).unsqueeze(2), action], 2)
 
-    reward = 100 if reward > 0 else reward
-    rb.append(obs, action, reward, next_obs, done)
+    # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
+    # so as to predict an action for each cell in the map; this obviously include a
+    # lot of invalid actions at cells for which no source units exist, so the rest of
+    # the code removes these invalid actions to speed things up
+    real_action = real_action.cpu().numpy()
+    valid_actions = real_action[invalid_action_mask[:, :, 0].bool().cpu().numpy()]
+    valid_actions_counts = invalid_action_mask[:, :, 0].sum(1).long().cpu().numpy()
+    java_valid_actions = []
+    valid_action_idx = 0
+    for env_idx, valid_action_count in enumerate(valid_actions_counts):
+        java_valid_action = []
+        for c in range(valid_action_count):
+            java_valid_action += [JArray(JInt)(valid_actions[valid_action_idx])]
+            valid_action_idx += 1
+        java_valid_actions += [JArray(JArray(JInt))(java_valid_action)]
+    java_valid_actions = JArray(JArray(JArray(JInt)))(java_valid_actions)
+
+    try:
+        next_obs, reward, done, _ = env.step(java_valid_actions)
+    except Exception as e:
+        e.printStackTrace()
+        raise
+
+    rb.append(obs.squeeze(), action.cpu().numpy().squeeze(), reward, next_obs.squeeze(), done, invalid_action_mask.cpu().numpy())
     episode_reward += reward
     episode_length += 1
     obs = np.array(next_obs)
 
     # ALGO LOGIC: training.
     if len(rb) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
-        s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
+        s_obs, s_actions, s_rewards, s_next_obses, s_dones, invalid_action_mask = rb.sample(args.batch_size)
         with torch.no_grad():
-            probs, next_state_log_probs = pg.forward(s_next_obses, device)
-            qf1_next_target = qf1_target.forward(s_next_obses, device)
-            qf2_next_target = qf2_target.forward(s_next_obses, device)
-            min_qf_next_target = (probs * (torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_probs)).sum(-1)
-            next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * min_qf_next_target
+            probs, next_state_log_probs = pg.forward(s_next_obses)
+            probs = probs.view(-1, env.action_space.nvec[1:].sum())
+            probs_split = torch.split(probs, env.action_space.nvec[1:].tolist(), dim=1)
 
-        qf1_a_values = qf1.forward(s_obs,  device)[np.arange(args.batch_size), np.array(s_actions)]
-        qf2_a_values = qf2.forward(s_obs,  device)[np.arange(args.batch_size), np.array(s_actions)]
-        qf1_loss = loss_fn(qf1_a_values, next_q_value)
-        qf2_loss = loss_fn(qf2_a_values, next_q_value)
+            next_state_log_probs = next_state_log_probs.view(-1, env.action_space.nvec[1:].sum())
+            next_state_log_probs_split = torch.split(next_state_log_probs, env.action_space.nvec[1:].tolist(), dim=1)
+
+            qf1_next_target = qf1_target.forward(s_next_obses)
+            qf1_next_target_split = torch.split(qf1_next_target.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
+
+            qf2_next_target = qf2_target.forward(s_next_obses)
+            qf2_next_target_split = torch.split(qf2_next_target.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
+
+
+            min_target = torch.min(qf1_next_target, qf2_next_target).view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+
+            min_next_target = torch.stack([(p * (m - alpha*n)).sum(-1) for p, m, n  in zip(probs_split, min_target, next_state_log_probs_split)])
+
+            next_q_value = torch.stack([torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * m.view(64, -1) for m in min_next_target])
+
+            #next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * min_next_target
+
+
+
+        s_actions = torch.LongTensor(s_actions).to(device).view(-1, s_actions.shape[-1]).T
+        qf1_a_values = qf1.forward(s_obs).view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+        qf2_a_values = qf2.forward(s_obs).view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+
+
+        qf1_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf1_a_values)])
+        qf2_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf2_a_values)])
+
+        #qf1_a_values = qf1.forward(s_obs)[np.arange(args.batch_size), np.array(s_actions)]
+        #qf2_a_values = qf2.forward(s_obs)[np.arange(args.batch_size), np.array(s_actions)]
+        qf1_loss = loss_fn(qf1_a_values, next_q_value.view(7, -1))
+        qf2_loss = loss_fn(qf2_a_values, next_q_value.view(7, -1))
         qf_loss = (qf1_loss + qf2_loss) / 2
 
         values_optimizer.zero_grad()
@@ -370,9 +457,9 @@ for global_step in range(1, args.total_timesteps+1):
 
         if global_step % args.policy_frequency == 0: # TD 3 Delayed update support
             for _ in range(args.policy_frequency): # compensate for the delay by doing 'actor_update_interval' instead of 1
-                probs, log_probs = pg.forward(s_obs, device)
-                qf1_pi = qf1.forward(s_obs, device)
-                qf2_pi = qf2.forward(s_obs, device)
+                probs, log_probs = pg.forward(s_obs)
+                qf1_pi = qf1.forward(s_obs)
+                qf2_pi = qf2.forward(s_obs)
                 min_qf_pi = torch.min(qf1_pi, qf2_pi)
                 policy_loss = (probs * (alpha * log_probs - min_qf_pi)).sum(-1).mean()
 
@@ -382,7 +469,7 @@ for global_step in range(1, args.total_timesteps+1):
 
                 if args.autotune:
                     with torch.no_grad():
-                        probs, log_probs = pg.forward(s_obs, device)
+                        probs, log_probs = pg.forward(s_obs)
                     probabilities = (probs * log_probs).sum(-1)
                     alpha_loss = -(log_alpha * (probabilities + target_entropy)).mean()
                     a_optimizer.zero_grad()
