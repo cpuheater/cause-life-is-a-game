@@ -232,7 +232,7 @@ if __name__ == "__main__":
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=1e1,
                         help="timestep to start learning")
-    parser.add_argument('--n-step', type=int, default=3,
+    parser.add_argument('--n-step', type=int, default=20,
                         help="n step")
 
 

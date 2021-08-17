@@ -89,7 +89,7 @@ if __name__ == "__main__":
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
-    parser.add_argument('--seed', type=int, default=2,
+    parser.add_argument('--seed', type=int, default=9,
                         help='seed of the experiment')
     parser.add_argument('--episode-length', type=int, default=0,
                         help='the maximum length of each episode')
@@ -127,15 +127,15 @@ if __name__ == "__main__":
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=1e1,
                         help="timestep to start learning")
-    parser.add_argument('--n-step', type=int, default=3,
+    parser.add_argument('--n-step', type=int, default=10,
                         help="n step")
 
 
     # Additional hyper parameters for tweaks
     ## Separating the learning rate of the policy and value commonly seen: (Original implementation, Denis Yarats)
-    parser.add_argument('--policy-lr', type=float, default=2e-4,
+    parser.add_argument('--policy-lr', type=float, default=1e-4,
                         help='the learning rate of the policy network optimizer')
-    parser.add_argument('--q-lr', type=float, default=2e-4,
+    parser.add_argument('--q-lr', type=float, default=1e-4,
                         help='the learning rate of the Q network network optimizer')
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')
