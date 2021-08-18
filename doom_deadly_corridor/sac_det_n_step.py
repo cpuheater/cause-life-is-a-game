@@ -89,7 +89,7 @@ class ViZDoomEnv:
         else:
             kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
         self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
-        return kill * 5 if kill > 0 else 0
+        return kill * 10 if kill > 0 else 0
 
     def step(self, action):
         info = {}
@@ -100,7 +100,7 @@ class ViZDoomEnv:
         else:
             ob = self.get_current_input()
         # reward scaling
-        reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
+        reward = (2*reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 
@@ -232,7 +232,7 @@ if __name__ == "__main__":
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=1e1,
                         help="timestep to start learning")
-    parser.add_argument('--n-step', type=int, default=20,
+    parser.add_argument('--n-step', type=int, default=10,
                         help="n step")
 
 
@@ -478,8 +478,8 @@ for global_step in range(1, args.total_timesteps+1):
         action, _ = pg.get_action([obs], device)
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, _ = env.step(action)
-    if done and reward < 0:
-        reward = -10
+    #if done and reward < 0:
+    #    reward = -10
     rb.append(obs, action, reward, next_obs, done)
     episode_reward += reward
     episode_length += 1

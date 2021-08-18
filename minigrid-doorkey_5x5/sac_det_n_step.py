@@ -107,7 +107,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='automatic tuning of the entropy coefficient.')
 
     # Algorithm specific arguments

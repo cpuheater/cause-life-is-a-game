@@ -427,7 +427,9 @@ for global_step in range(1, args.total_timesteps+1):
             qf2_next_target_split = torch.split(qf2_next_target.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
 
 
-            min_target = torch.min(qf1_next_target, qf2_next_target).view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+            #min_target = torch.min(qf1_next_target, qf2_next_target).view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+
+            min_target = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
 
             min_next_target = torch.stack([(p * (m - alpha*n)).sum(-1) for p, m, n  in zip(probs_split, min_target, next_state_log_probs_split)])
 
@@ -458,10 +460,31 @@ for global_step in range(1, args.total_timesteps+1):
         if global_step % args.policy_frequency == 0: # TD 3 Delayed update support
             for _ in range(args.policy_frequency): # compensate for the delay by doing 'actor_update_interval' instead of 1
                 probs, log_probs = pg.forward(s_obs)
+
+                probs = probs.view(-1, env.action_space.nvec[1:].sum())
+                probs_split = torch.split(probs, env.action_space.nvec[1:].tolist(), dim=1)
+
+                log_probs = next_state_log_probs.view(-1, env.action_space.nvec[1:].sum())
+                log_probs_split = torch.split(log_probs, env.action_space.nvec[1:].tolist(), dim=1)
+
+
                 qf1_pi = qf1.forward(s_obs)
+                qf1_pi_split = torch.split(qf1_pi.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
+
                 qf2_pi = qf2.forward(s_obs)
-                min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                policy_loss = (probs * (alpha * log_probs - min_qf_pi)).sum(-1).mean()
+                qf2_pi_split = torch.split(qf2_pi.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
+
+
+                min_qf_pi = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
+                #min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                #policy_loss = (probs * (alpha * log_probs - min_qf_pi)).sum(-1).mean()
+                [p * (alpha * l_p - min_qf_pi) for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]
+
+                for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi):
+                    dupa = (p * (alpha * l_p - min))
+                    dupa2 = dupa.sum(-1)
+                    dupa3 = dupa2.mean()
+                    print(dupa3)
 
                 policy_optimizer.zero_grad()
                 policy_loss.backward()
