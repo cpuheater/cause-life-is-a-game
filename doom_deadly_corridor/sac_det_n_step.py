@@ -89,7 +89,7 @@ class ViZDoomEnv:
         else:
             kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
         self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
-        return kill * 10 if kill > 0 else 0
+        return kill * 5 if kill > 0 else 0
 
     def step(self, action):
         info = {}
@@ -100,7 +100,7 @@ class ViZDoomEnv:
         else:
             ob = self.get_current_input()
         # reward scaling
-        reward = (2*reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
+        reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 
@@ -212,7 +212,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='automatic tuning of the entropy coefficient.')
 
     # Algorithm specific arguments
@@ -238,9 +238,9 @@ if __name__ == "__main__":
 
     # Additional hyper parameters for tweaks
     ## Separating the learning rate of the policy and value commonly seen: (Original implementation, Denis Yarats)
-    parser.add_argument('--policy-lr', type=float, default=2e-4,
+    parser.add_argument('--policy-lr', type=float, default=1e-4,
                         help='the learning rate of the policy network optimizer')
-    parser.add_argument('--q-lr', type=float, default=2e-4,
+    parser.add_argument('--q-lr', type=float, default=1e-4,
                         help='the learning rate of the Q network network optimizer')
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')

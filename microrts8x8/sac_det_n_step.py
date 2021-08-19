@@ -103,7 +103,7 @@ if __name__ == "__main__":
                         help='seed of the experiment')
     parser.add_argument('--episode-length', type=int, default=0,
                         help='the maximum length of each episode')
-    parser.add_argument('--total-timesteps', type=int, default=4000000,
+    parser.add_argument('--total-timesteps', type=int, default=20000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -117,7 +117,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='automatic tuning of the entropy coefficient.')
 
     # Algorithm specific arguments
@@ -137,7 +137,7 @@ if __name__ == "__main__":
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=0,
                         help="timestep to start learning")
-    parser.add_argument('--n-step', type=int, default=3,
+    parser.add_argument('--n-step', type=int, default=6,
                         help="n step")
     parser.add_argument('--num-bot-envs', type=int, default=1,
                         help='the number of bot game environment; 16 bot envs measn 16 games')
@@ -237,7 +237,7 @@ class Policy(nn.Module):
             layer_init(nn.Linear(128, 128)),
             nn.ReLU())
 
-        self.logits = layer_init(nn.Linear(128, self.mapsize * env.action_space.nvec[1:].sum()), std=1)
+        self.logits = layer_init(nn.Linear(128, self.mapsize * env.action_space.nvec[1:].sum()), std=0.01)
 
     def forward(self, x):
         x = torch.Tensor(x).to(device)
@@ -249,38 +249,23 @@ class Policy(nn.Module):
         log_probs = torch.log(probs + z)
         return probs, log_probs
 
-    def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
+    def get_action(self, x, envs=None):
         logits, _ = self.forward(x)
         grid_logits = logits.view(-1, env.action_space.nvec[1:].sum())
         split_logits = torch.split(grid_logits, env.action_space.nvec[1:].tolist(), dim=1)
 
-        if action is None:
-            invalid_action_masks = torch.tensor(np.array(envs.vec_client.getMasks(0))).to(device)
-            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
-                                                     dim=1)
-            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
-                                  zip(split_logits, split_invalid_action_masks)]
-            action = torch.stack([categorical.sample() for categorical in multi_categoricals])
-        else:
-            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            action = action.view(-1, action.shape[-1]).T
-            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
-                                                     dim=1)
-            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
-                                  zip(split_logits, split_invalid_action_masks)]
-        logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
-        entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
+        invalid_action_masks = torch.tensor(np.array(envs.vec_client.getMasks(0))).to(device)
+        invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
+        split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
+                                                 dim=1)
+        multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
+                              zip(split_logits, split_invalid_action_masks)]
+        action = torch.stack([categorical.sample() for categorical in multi_categoricals])
         num_predicted_parameters = len(envs.action_space.nvec) - 1
-        logprob = logprob.T.view(-1, 64, num_predicted_parameters)
-        entropy = entropy.T.view(-1, 64, num_predicted_parameters)
         action = action.T.view(-1, 64, num_predicted_parameters)
         invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
         return action, invalid_action_masks
-        #probs, log_probs = self.forward(x, device)
-        #dist = Categorical(probs)
-        #action = dist.sample()
-        #return action.detach().cpu().numpy()[0], dist
+
 
 class SoftQNetwork(nn.Module):
     def __init__(self, mapsize=8 * 8):
@@ -367,10 +352,9 @@ else:
     alpha = args.alpha
 
 # TRY NOT TO MODIFY: start the game
+start_time = time.time()
 global_episode = 0
 obs, done = env.reset(), False
-episode_reward, episode_length= 0.,0
-max_episode_reward = -np.inf
 for global_step in range(1, args.total_timesteps+1):
     # ALGO LOGIC: put action logic here
     env.render()
@@ -399,15 +383,21 @@ for global_step in range(1, args.total_timesteps+1):
     java_valid_actions = JArray(JArray(JArray(JInt)))(java_valid_actions)
 
     try:
-        next_obs, reward, done, _ = env.step(java_valid_actions)
+        next_obs, reward, done, infos = env.step(java_valid_actions)
     except Exception as e:
         e.printStackTrace()
         raise
 
     rb.append(obs.squeeze(), action.cpu().numpy().squeeze(), reward, next_obs.squeeze(), done, invalid_action_mask.cpu().numpy())
-    episode_reward += reward
-    episode_length += 1
     obs = np.array(next_obs)
+
+    for info in infos:
+        if 'episode' in info.keys():
+            print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+            writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+            for key in info['microrts_stats']:
+                writer.add_scalar(f"charts/episode_reward/{key}", info['microrts_stats'][key], global_step)
+            break
 
     # ALGO LOGIC: training.
     if len(rb) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
@@ -426,12 +416,9 @@ for global_step in range(1, args.total_timesteps+1):
             qf2_next_target = qf2_target.forward(s_next_obses)
             qf2_next_target_split = torch.split(qf2_next_target.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
 
-
-            #min_target = torch.min(qf1_next_target, qf2_next_target).view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
-
             min_target = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
 
-            min_next_target = torch.stack([(p * (m - alpha*n)).sum(-1) for p, m, n  in zip(probs_split, min_target, next_state_log_probs_split)])
+            min_next_target = tuple([(p * (m - alpha*n)).sum(-1) for p, m, n in zip(probs_split, min_target, next_state_log_probs_split)])
 
             next_q_value = torch.stack([torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * m.view(64, -1) for m in min_next_target])
 
@@ -478,13 +465,7 @@ for global_step in range(1, args.total_timesteps+1):
                 min_qf_pi = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
                 #min_qf_pi = torch.min(qf1_pi, qf2_pi)
                 #policy_loss = (probs * (alpha * log_probs - min_qf_pi)).sum(-1).mean()
-                [p * (alpha * l_p - min_qf_pi) for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]
-
-                for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi):
-                    dupa = (p * (alpha * l_p - min))
-                    dupa2 = dupa.sum(-1)
-                    dupa3 = dupa2.mean()
-                    print(dupa3)
+                policy_loss = torch.stack([(p * (alpha * l_p - min)).sum(-1).mean() for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]).sum()
 
                 policy_optimizer.zero_grad()
                 policy_loss.backward()
@@ -519,18 +500,11 @@ for global_step in range(1, args.total_timesteps+1):
         writer.add_scalar("alpha", alpha, global_step)
         if args.autotune:
             writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
-
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
+    print("SPS:", int(global_step / (time.time() - start_time)))
     if done:
-        global_episode += 1 # Outside the loop already means the epsiode is done
-        writer.add_scalar("charts/episode_reward", episode_reward, global_step)
-        writer.add_scalar("charts/episode_length", episode_length, global_step)
-        # Terminal verbosity
-        if global_episode % 1 == 0:
-            print(f"Episode: {global_episode} Step: {global_step}, Ep. Reward: {episode_reward}")
-
         # Reseting what need to be
         obs, done = env.reset(), False
-        episode_reward, episode_length = 0., 0
 
 
 writer.close()

@@ -183,7 +183,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='automatic tuning of the entropy coefficient.')
 
     # Algorithm specific arguments
@@ -203,7 +203,7 @@ if __name__ == "__main__":
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=1e1,
                         help="timestep to start learning")
-    parser.add_argument('--n-step', type=int, default=3,
+    parser.add_argument('--n-step', type=int, default=10,
                         help="n step")
 
 
@@ -432,6 +432,7 @@ if args.autotune:
     log_alpha = torch.zeros(1, requires_grad=True, device=device)
     alpha = log_alpha.exp().item()
     a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
+
 else:
     alpha = args.alpha
 
