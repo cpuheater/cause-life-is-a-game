@@ -247,12 +247,12 @@ class Policy(nn.Module):
         z = probs == 0.0
         z = z.float() * 1e-8
         log_probs = torch.log(probs + z)
-        return probs, log_probs
+        split_log_probs = log_probs.view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+        split_probs = probs.view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+        return split_probs, split_log_probs
 
     def get_action(self, x, envs=None):
-        logits, _ = self.forward(x)
-        grid_logits = logits.view(-1, env.action_space.nvec[1:].sum())
-        split_logits = torch.split(grid_logits, env.action_space.nvec[1:].tolist(), dim=1)
+        split_logits, _ = self.forward(x)
 
         invalid_action_masks = torch.tensor(np.array(envs.vec_client.getMasks(0))).to(device)
         invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
@@ -285,7 +285,9 @@ class SoftQNetwork(nn.Module):
     def forward(self, x):
         x = torch.Tensor(x).to(device)
         x = self.network(x.permute((0, 3, 1, 2)))
-        return self.q_value(x)
+        x = self.q_value(x)
+        x = torch.split(x.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
+        return x
 
 class ReplayBufferNStep(object):
     def __init__(self, size, n_step, gamma):
@@ -403,32 +405,20 @@ for global_step in range(1, args.total_timesteps+1):
     if len(rb) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
         s_obs, s_actions, s_rewards, s_next_obses, s_dones, invalid_action_mask = rb.sample(args.batch_size)
         with torch.no_grad():
-            probs, next_state_log_probs = pg.forward(s_next_obses)
-            probs = probs.view(-1, env.action_space.nvec[1:].sum())
-            probs_split = torch.split(probs, env.action_space.nvec[1:].tolist(), dim=1)
+            probs_split, next_state_log_probs_split = pg.forward(s_next_obses)
 
-            next_state_log_probs = next_state_log_probs.view(-1, env.action_space.nvec[1:].sum())
-            next_state_log_probs_split = torch.split(next_state_log_probs, env.action_space.nvec[1:].tolist(), dim=1)
-
-            qf1_next_target = qf1_target.forward(s_next_obses)
-            qf1_next_target_split = torch.split(qf1_next_target.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
-
-            qf2_next_target = qf2_target.forward(s_next_obses)
-            qf2_next_target_split = torch.split(qf2_next_target.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
-
+            qf1_next_target_split = qf1_target.forward(s_next_obses)
+            qf2_next_target_split = qf2_target.forward(s_next_obses)
             min_target = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
-
+            #min_qf_next_target = (probs * (torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_probs)).sum(-1)
             min_next_target = tuple([(p * (m - alpha*n)).sum(-1) for p, m, n in zip(probs_split, min_target, next_state_log_probs_split)])
 
-            next_q_value = torch.stack([torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * m.view(64, -1) for m in min_next_target])
-
+            next_q_value = torch.stack([torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * m.view(args.batch_size, -1) for m in min_next_target])
             #next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * min_next_target
 
-
-
         s_actions = torch.LongTensor(s_actions).to(device).view(-1, s_actions.shape[-1]).T
-        qf1_a_values = qf1.forward(s_obs).view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
-        qf2_a_values = qf2.forward(s_obs).view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+        qf1_a_values = qf1.forward(s_obs)
+        qf2_a_values = qf2.forward(s_obs)
 
 
         qf1_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf1_a_values)])
@@ -446,23 +436,12 @@ for global_step in range(1, args.total_timesteps+1):
 
         if global_step % args.policy_frequency == 0: # TD 3 Delayed update support
             for _ in range(args.policy_frequency): # compensate for the delay by doing 'actor_update_interval' instead of 1
-                probs, log_probs = pg.forward(s_obs)
+                probs_split, log_probs_split = pg.forward(s_obs)
 
-                probs = probs.view(-1, env.action_space.nvec[1:].sum())
-                probs_split = torch.split(probs, env.action_space.nvec[1:].tolist(), dim=1)
+                qf1_pi_split = qf1.forward(s_obs)
+                qf2_pi_split = qf2.forward(s_obs)
 
-                log_probs = next_state_log_probs.view(-1, env.action_space.nvec[1:].sum())
-                log_probs_split = torch.split(log_probs, env.action_space.nvec[1:].tolist(), dim=1)
-
-
-                qf1_pi = qf1.forward(s_obs)
-                qf1_pi_split = torch.split(qf1_pi.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
-
-                qf2_pi = qf2.forward(s_obs)
-                qf2_pi_split = torch.split(qf2_pi.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
-
-
-                min_qf_pi = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
+                min_qf_pi = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_pi_split, qf2_pi_split)])
                 #min_qf_pi = torch.min(qf1_pi, qf2_pi)
                 #policy_loss = (probs * (alpha * log_probs - min_qf_pi)).sum(-1).mean()
                 policy_loss = torch.stack([(p * (alpha * l_p - min)).sum(-1).mean() for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]).sum()
@@ -501,7 +480,6 @@ for global_step in range(1, args.total_timesteps+1):
         if args.autotune:
             writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
     writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
-    print("SPS:", int(global_step / (time.time() - start_time)))
     if done:
         # Reseting what need to be
         obs, done = env.reset(), False
