@@ -243,13 +243,11 @@ class Policy(nn.Module):
         x = torch.Tensor(x).to(device)
         x = self.network(x.permute((0, 3, 1, 2)))
         logits = self.logits(x)
-        probs = F.softmax(logits, -1)
-        z = probs == 0.0
-        z = z.float() * 1e-8
-        log_probs = torch.log(probs + z)
-        split_log_probs = log_probs.view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
-        split_probs = probs.view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
-        return split_probs, split_log_probs
+        logits_split = logits.view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+        probs_split = tuple([F.softmax(ls, -1) for ls in logits_split])
+        zeros = tuple([(p == 0.0).float() * 1e-8 for p in probs_split])
+        log_probs_split = tuple([torch.log(p + z) for p, z in zip(probs_split, zeros)])
+        return probs_split, log_probs_split
 
     def get_action(self, x, envs=None):
         split_logits, _ = self.forward(x)
@@ -420,9 +418,9 @@ for global_step in range(1, args.total_timesteps+1):
         qf1_a_values = qf1.forward(s_obs)
         qf2_a_values = qf2.forward(s_obs)
 
-
         qf1_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf1_a_values)])
         qf2_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf2_a_values)])
+
 
         #qf1_a_values = qf1.forward(s_obs)[np.arange(args.batch_size), np.array(s_actions)]
         #qf2_a_values = qf2.forward(s_obs)[np.arange(args.batch_size), np.array(s_actions)]
@@ -444,7 +442,7 @@ for global_step in range(1, args.total_timesteps+1):
                 min_qf_pi = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_pi_split, qf2_pi_split)])
                 #min_qf_pi = torch.min(qf1_pi, qf2_pi)
                 #policy_loss = (probs * (alpha * log_probs - min_qf_pi)).sum(-1).mean()
-                policy_loss = torch.stack([(p * (alpha * l_p - min)).sum(-1).mean() for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]).sum()
+                policy_loss = torch.stack([(p * (alpha * l_p - min)).sum(-1).mean() for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]).mean()
 
                 policy_optimizer.zero_grad()
                 policy_loss.backward()
