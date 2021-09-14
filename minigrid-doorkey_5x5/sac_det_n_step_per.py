@@ -85,7 +85,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-16x16-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
@@ -111,7 +111,7 @@ if __name__ == "__main__":
                         help='automatic tuning of the entropy coefficient.')
 
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=10000,
+    parser.add_argument('--buffer-size', type=int, default=100000,
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -127,7 +127,7 @@ if __name__ == "__main__":
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=1e1,
                         help="timestep to start learning")
-    parser.add_argument('--n-step', type=int, default=5,
+    parser.add_argument('--n-step', type=int, default=10,
                         help="n step")
 
 
@@ -265,46 +265,202 @@ class SoftQNetwork(nn.Module):
         x = F.relu(self.fc(x))
         return self.q_value(x)
 
-class ReplayBufferNStep(object):
-    def __init__(self, size, n_step, gamma):
-        self._storage = deque(maxlen=size)
+import random
+import operator
+
+class SegmentTree(object):
+    def __init__(self, capacity, operation, neutral_element):
+        assert capacity > 0 and capacity & (capacity - 1) == 0, "capacity must be positive and a power of 2."
+        self._capacity = capacity
+        self._value = [neutral_element for _ in range(2 * capacity)]
+        self._operation = operation
+
+    def _reduce_helper(self, start, end, node, node_start, node_end):
+        if start == node_start and end == node_end:
+            return self._value[node]
+        mid = (node_start + node_end) // 2
+        if end <= mid:
+            return self._reduce_helper(start, end, 2 * node, node_start, mid)
+        else:
+            if mid + 1 <= start:
+                return self._reduce_helper(start, end, 2 * node + 1, mid + 1, node_end)
+            else:
+                return self._operation(
+                    self._reduce_helper(start, mid, 2 * node, node_start, mid),
+                    self._reduce_helper(mid + 1, end, 2 * node + 1, mid + 1, node_end)
+                )
+
+    def reduce(self, start=0, end=None):
+
+        if end is None:
+            end = self._capacity
+        if end < 0:
+            end += self._capacity
+        end -= 1
+        return self._reduce_helper(start, end, 1, 0, self._capacity - 1)
+
+    def __setitem__(self, idx, val):
+        # index of the leaf
+        idx += self._capacity
+        self._value[idx] = val
+        idx //= 2
+        while idx >= 1:
+            self._value[idx] = self._operation(
+                self._value[2 * idx],
+                self._value[2 * idx + 1]
+            )
+            idx //= 2
+
+    def __getitem__(self, idx):
+        assert 0 <= idx < self._capacity
+        return self._value[self._capacity + idx]
+
+
+class SumSegmentTree(SegmentTree):
+    def __init__(self, capacity):
+        super(SumSegmentTree, self).__init__(
+            capacity=capacity,
+            operation=operator.add,
+            neutral_element=0.0
+        )
+
+    def sum(self, start=0, end=None):
+        return super(SumSegmentTree, self).reduce(start, end)
+
+    def find_prefixsum_idx(self, prefixsum):
+
+        try:
+            assert 0 <= prefixsum <= self.sum() + 1e-5
+        except AssertionError:
+            print("Prefix sum error: {}".format(prefixsum))
+            exit()
+        idx = 1
+        while idx < self._capacity:  # while non-leaf
+            if self._value[2 * idx] > prefixsum:
+                idx = 2 * idx
+            else:
+                prefixsum -= self._value[2 * idx]
+                idx = 2 * idx + 1
+        return idx - self._capacity
+
+
+class MinSegmentTree(SegmentTree):
+    def __init__(self, capacity):
+        super(MinSegmentTree, self).__init__(
+            capacity=capacity,
+            operation=min,
+            neutral_element=float('inf')
+        )
+
+    def min(self, start=0, end=None):
+
+        return super(MinSegmentTree, self).reduce(start, end)
+
+
+class PrioritizedReplayMemory(object):
+    def __init__(self, size, nsteps, gamma, alpha=0.6, beta_start=0.4, beta_frames=100000):
+        super(PrioritizedReplayMemory, self).__init__()
+        self._storage = []
         self._maxsize = size
-        self.n_step_buffer = deque(maxlen=n_step)
+        self._next_idx = 0
+
+        assert alpha >= 0
+        self._alpha = alpha
+
+        self.beta_start = beta_start
+        self.beta_frames = beta_frames
+        self.frame=1
+
+        it_capacity = 1
+        while it_capacity < size:
+            it_capacity *= 2
+
+        self._it_sum = SumSegmentTree(it_capacity)
+        self._it_min = MinSegmentTree(it_capacity)
+        self._max_priority = 1.0
+        self.nstep_buffer = []
+        self.nsteps = nsteps
         self.gamma = gamma
-        self.n_step = n_step
+
+    def beta_by_frame(self, frame_idx):
+        return min(1.0, self.beta_start + frame_idx * (1.0 - self.beta_start) / self.beta_frames)
+
+    def push(self, data):
+        idx = self._next_idx
+
+        if self._next_idx >= len(self._storage):
+            self._storage.append(data)
+        else:
+            self._storage[self._next_idx] = data
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+
+
+        self._it_sum[idx] = self._max_priority ** self._alpha
+        self._it_min[idx] = self._max_priority ** self._alpha
+
+    def _encode_sample(self, idxes):
+        return [self._storage[i] for i in idxes]
+
+    def _sample_proportional(self, batch_size):
+        res = []
+        for _ in range(batch_size):
+            mass = random.random() * self._it_sum.sum(0, len(self._storage) - 1)
+            idx = self._it_sum.find_prefixsum_idx(mass)
+            res.append(idx)
+        return res
 
     def __len__(self):
         return len(self._storage)
 
+    def sample(self, batch_size):
+        idxes = self._sample_proportional(batch_size)
+
+        weights = []
+
+        #find smallest sampling prob: p_min = smallest priority^alpha / sum of priorities^alpha
+        p_min = self._it_min.min() / self._it_sum.sum()
+
+        beta = self.beta_by_frame(self.frame)
+        self.frame+=1
+
+        #max_weight given to smallest prob
+        max_weight = (p_min * len(self._storage)) ** (-beta)
+
+        for idx in idxes:
+            p_sample = self._it_sum[idx] / self._it_sum.sum()
+            weight = (p_sample * len(self._storage)) ** (-beta)
+            weights.append(weight / max_weight)
+        weights = torch.tensor(weights, dtype=torch.float).to(device)
+        encoded_sample = self._encode_sample(idxes)
+        return encoded_sample, idxes, weights
+
+    def update_priorities(self, idxes, priorities):
+        assert len(idxes) == len(priorities)
+        for idx, priority in zip(idxes, priorities):
+            assert 0 <= idx < len(self._storage)
+            self._it_sum[idx] = (priority+1e-5) ** self._alpha
+            self._it_min[idx] = (priority+1e-5) ** self._alpha
+
+            self._max_priority = max(self._max_priority, (priority+1e-5))
+
+
     def get_n_step(self):
-        _, _, reward, next_observation, done = self.n_step_buffer[-1]
-        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
+        _, _, reward, next_observation, done = self.nstep_buffer[-1]
+        for _, _, r, next_obs, do in reversed(list(self.nstep_buffer)[:-1]):
             reward = self.gamma * reward * (1 - do) + r
             mext_observation, done = (next_obs, do) if do else (next_observation, done)
         return reward, next_observation, done
 
-    def append(self, obs, action, reward, next_obs, done):
-        self.n_step_buffer.append((obs, action, reward, next_obs, done))
-        if len(self.n_step_buffer) < self.n_step:
+    def append(self, s, a, r, s_, done):
+        self.nstep_buffer.append((s, a, r, s_, done))
+        if(len(self.nstep_buffer)<self.nsteps):
             return
-        reward, next_obs, done = self.get_n_step()
-        obs, action, _, _, _ = self.n_step_buffer[0]
-        self._storage.append([obs, action, reward, next_obs, done])
+        reward, next_observation, done = self.get_n_step()
+        state, action, _, _, _ = self.nstep_buffer.pop(0)
+        self.push((state, action, reward, next_observation, done))
 
-    def sample(self, batch_size):
-        idxes = np.random.choice(len(self._storage), batch_size, replace=True)
-        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
-        for i in idxes:
-            data = self._storage[i]
-            obs_t, action, reward, obs_tp1, done = data
-            obses_t.append(np.array(obs_t, copy=False))
-            actions.append(np.array(action, copy=False))
-            rewards.append(reward)
-            obses_tp1.append(np.array(obs_tp1, copy=False))
-            dones.append(done)
-        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
-rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
+rb=PrioritizedReplayMemory(args.buffer_size, args.n_step, args.gamma)
 
 pg = Policy(input_shape, env.action_space.n).to(device)
 qf1 = SoftQNetwork(input_shape, env.action_space.n).to(device)
@@ -350,7 +506,8 @@ for global_step in range(1, args.total_timesteps+1):
 
     # ALGO LOGIC: training.
     if len(rb) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
-        s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
+        transitions, indices, weights = rb.sample(args.batch_size)
+        s_obs, s_actions, s_rewards, s_next_obses, s_dones = zip(*transitions)
         with torch.no_grad():
             probs, next_state_log_probs = pg.forward(s_next_obses, device)
             qf1_next_target = qf1_target.forward(s_next_obses, device)
@@ -360,10 +517,13 @@ for global_step in range(1, args.total_timesteps+1):
 
         qf1_a_values = qf1.forward(s_obs,  device)[np.arange(args.batch_size), np.array(s_actions)]
         qf2_a_values = qf2.forward(s_obs,  device)[np.arange(args.batch_size), np.array(s_actions)]
-        qf1_loss = loss_fn(qf1_a_values, next_q_value)
-        qf2_loss = loss_fn(qf2_a_values, next_q_value)
+
+        qf1_loss = (0.5 * (qf1_a_values - next_q_value).pow(2) * weights).mean()
+        qf2_loss = (0.5 * (qf2_a_values - next_q_value).pow(2) * weights).mean()
         qf_loss = (qf1_loss + qf2_loss) / 2
 
+        errors = torch.abs(qf1_a_values.detach() - next_q_value)
+        rb.update_priorities(indices, errors.detach().squeeze().abs().cpu().numpy().tolist())
         values_optimizer.zero_grad()
         qf_loss.backward()
         values_optimizer.step()
