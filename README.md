@@ -1,4 +1,4 @@
-### Cause life is a game - solving games with Deep Reinforcement Learning!
+### Solving games with Deep Reinforcement Learning!
 Each directory contains files related to a specific game. Each file is a self-contained rl algorithm.    
 The core algorithms are based on [cleanrl](https://github.com/vwxyzjn/cleanrl).
 
