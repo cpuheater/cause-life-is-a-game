@@ -1,6 +1,9 @@
-### Solving games with Deep Reinforcement Learning!
+### Solving video games with Deep Reinforcement Learning!
 Each directory contains files related to a specific game. Each file is a self-contained rl algorithm.    
-The core algorithms are based on [cleanrl](https://github.com/vwxyzjn/cleanrl).
+The core algorithms are based on [cleanrl](https://github.com/vwxyzjn/cleanrl) and comes with many 
+cleanrl goodies like: tensorboard logging, videos of gameplay capturing, experiment 
+management with [Weights and Biases](https://wandb.ai/site). 
+  
 
 ### List of algorithms
 * ppo  - Proximal Policy Optimization Algorithms (https://arxiv.org/abs/1707.06347)    
