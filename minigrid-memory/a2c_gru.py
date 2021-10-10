@@ -326,6 +326,7 @@ for update in range(1, num_updates+1):
 
         for info in infos:
             if info and 'reward' in info.keys():
+                print(info['reward'])
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
             if info and 'length' in info.keys():
                 writer.add_scalar("charts/episode_length", info['length'], global_step)
