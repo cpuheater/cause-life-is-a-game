@@ -1,9 +1,8 @@
-## Cause life is a game.
-## Solving games with Deep Reinforcement Learning!
+### Cause life is a game - solving games with Deep Reinforcement Learning!
 Each directory contains files related to a specific game. Each file is a self-contained rl algorithm.    
 
 
-## List of algorithms
+### List of algorithms
 * ppo  - Proximal Policy Optimization Algorithms (https://arxiv.org/abs/1707.06347)    
 * ppo_lstm - ppo with recurrent policy using LSTM
 * ppo_gru - ppo with recurrent policy using GRU 
