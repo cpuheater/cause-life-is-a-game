@@ -57,7 +57,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-16x16-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -483,7 +483,7 @@ agent = Agent(envs, img_dim = 7,
               dim=49,
               blocks=1,
               heads=7,
-              dim_linear_block=640,
+              dim_linear_block=400,
               dim_head=None,).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
