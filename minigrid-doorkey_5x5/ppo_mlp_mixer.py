@@ -57,7 +57,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-16x16-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -226,7 +226,118 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+import einops
+
+class MlpBlock(nn.Module):
+
+    def __init__(self, dim, mlp_dim=None):
+        super().__init__()
+
+        mlp_dim = dim if mlp_dim is None else mlp_dim
+        self.linear_1 = nn.Linear(dim, mlp_dim)
+        self.activation = nn.GELU()
+        self.linear_2 = nn.Linear(mlp_dim, dim)
+
+    def forward(self, x):
+        x = self.linear_1(x)  # (n_samples, *, mlp_dim)
+        x = self.activation(x)  # (n_samples, *, mlp_dim)
+        x = self.linear_2(x)  # (n_samples, *, dim)
+        return x
+
+
+class MixerBlock(nn.Module):
+
+    def __init__(
+            self, *, n_patches, hidden_dim, tokens_mlp_dim, channels_mlp_dim
+    ):
+        super().__init__()
+
+        self.norm_1 = nn.LayerNorm(hidden_dim)
+        self.norm_2 = nn.LayerNorm(hidden_dim)
+
+        self.token_mlp_block = MlpBlock(n_patches, tokens_mlp_dim)
+        self.channel_mlp_block = MlpBlock(hidden_dim, channels_mlp_dim)
+
+    def forward(self, x):
+        y = self.norm_1(x)  # (n_samples, n_patches, hidden_dim)
+        y = y.permute(0, 2, 1)  # (n_samples, hidden_dim, n_patches)
+        y = self.token_mlp_block(y)  # (n_samples, hidden_dim, n_patches)
+        y = y.permute(0, 2, 1)  # (n_samples, n_patches, hidden_dim)
+        x = x + y  # (n_samples, n_patches, hidden_dim)
+        y = self.norm_2(x)  # (n_samples, n_patches, hidden_dim)
+        res = x + self.channel_mlp_block(
+            y
+        )  # (n_samples, n_patches, hidden_dim)
+        return res
+
+
 class Agent(nn.Module):
+    def __init__(
+            self,
+            envs,
+            image_size,
+            patch_size,
+            tokens_mlp_dim,
+            channels_mlp_dim,
+            hidden_dim,
+            n_blocks,
+    ):
+        super().__init__()
+        n_patches = (image_size // patch_size) ** 2 # assumes divisibility
+
+        self.patch_embedder = nn.Conv2d(
+            3,
+            hidden_dim,
+            kernel_size=patch_size,
+            stride=patch_size,
+        )
+        self.blocks = nn.ModuleList(
+            [
+                MixerBlock(
+                    n_patches=n_patches,
+                    hidden_dim=hidden_dim,
+                    tokens_mlp_dim=tokens_mlp_dim,
+                    channels_mlp_dim=channels_mlp_dim,
+                )
+                for _ in range(n_blocks)
+            ]
+        )
+
+        self.pre_head_norm = nn.LayerNorm(hidden_dim)
+
+        self.actor = layer_init(nn.Linear(hidden_dim, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(hidden_dim, 1), std=1)
+
+    def forward(self, x):
+
+        x = self.patch_embedder(
+            x
+        )  # (n_samples, hidden_dim, n_patches ** (1/2), n_patches ** (1/2))
+        x = einops.rearrange(
+            x, "n c h w -> n (h w) c"
+        )  # (n_samples, n_patches, hidden_dim)
+        for mixer_block in self.blocks:
+            x = mixer_block(x)  # (n_samples, n_patches, hidden_dim)
+
+        x = self.pre_head_norm(x)  # (n_samples, n_patches, hidden_dim)
+        x = x.mean(dim=1)  # (n_samples, hidden_dim)
+
+        return x
+
+    def get_action(self, x, action=None):
+        x = self.forward(x)
+        value = self.critic(x)
+        logits = self.actor(x)
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return value, action, probs.log_prob(action), probs.entropy()
+
+    def get_value(self, x):
+        return self.critic(self.forward(x))
+
+
+class Agent2(nn.Module):
     def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
@@ -257,7 +368,7 @@ class Agent(nn.Module):
     def get_value(self, x):
         return self.critic(self.forward(x))
 
-agent = Agent(envs).to(device)
+agent = Agent(envs, 7,7,188,188,188,1).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
@@ -349,11 +460,9 @@ for update in range(1, num_updates+1):
     b_values = values.reshape(-1)
 
     # Optimizaing the policy and value network
-    target_agent = Agent(envs).to(device)
     inds = np.arange(args.batch_size,)
     for i_epoch_pi in range(args.update_epochs):
         np.random.shuffle(inds)
-        target_agent.load_state_dict(agent.state_dict())
         for start in range(0, args.batch_size, args.minibatch_size):
             end = start + args.minibatch_size
             minibatch_ind = inds[start:end]

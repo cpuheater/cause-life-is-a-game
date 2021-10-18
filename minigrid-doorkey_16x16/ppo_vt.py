@@ -350,7 +350,7 @@ class Agent(nn.Module):
         return self.critic(self.forward(x))
 
 #agent = Agent(envs).to(device)
-agent = Agent(img_size=7, patch_size=7, in_chans=3,embed_dim=49, depth=1, n_heads=7, mlp_ration=48, p=0.0, attn_p=0.1).to(device)
+agent = Agent(img_size=7, patch_size=3, in_chans=3,embed_dim=98, depth=1, n_heads=7, mlp_ration=98, p=0.1, attn_p=0).to(device)
 
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
