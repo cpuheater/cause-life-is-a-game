@@ -105,6 +105,14 @@ if __name__ == "__main__":
                         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+    parser.add_argument('--icm-enabled', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+                        help='enable ICM')
+    parser.add_argument('--icm-alpha', type=float, default=1,
+                        help="icm alpha")
+    parser.add_argument('--icm-beta', type=float, default=0.2,
+                        help='icm beta')
+    parser.add_argument('--icm-lambda', type=float, default=1,
+                        help='icm lambda')
 
     args = parser.parse_args()
     if not args.seed:
@@ -171,6 +179,59 @@ envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in ra
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
+class InverseModel(nn.Module):
+    def __init__(self, envs):
+        super(InverseModel, self).__init__()
+        self.network = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.observation_space.shape).prod() * 2, 256)),
+            nn.ReLU(),
+            layer_init(nn.Linear(256, envs.action_space.n))
+        )
+
+    def forward(self, obs, next_obs):
+        action = self.network(torch.cat([obs, next_obs], dim=1))
+        return action
+
+class ForwardModel(nn.Module):
+    def __init__(self, envs):
+        super(ForwardModel, self).__init__()
+        self.network = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.observation_space.shape).prod() + envs.action_space.n, 256)),
+            nn.ReLU(),
+            layer_init(nn.Linear(256, np.array(envs.observation_space.shape).prod()))
+        )
+        self.action_space = envs.action_space.n
+
+    def forward(self, obs, action):
+        action_onehot = torch.FloatTensor(
+            len(action), self.action_space).to(device)
+        action_onehot.zero_()
+        action_onehot.scatter_(1, action.view(len(action), -1), 1)
+        obs_action = torch.cat([obs, action_onehot], dim=1)
+        next_obs = self.network(obs_action)
+        return next_obs
+
+
+class ICM(nn.Module):
+    def __init__(self, envs):
+        super(ICM, self).__init__()
+        self.forward_model = ForwardModel(envs)
+        self.inverse_model = InverseModel(envs)
+
+
+    def forward(self, obs, next_obs, action):
+        obs_pred = self.forward_model(obs, action)
+        action_pred = self.inverse_model(obs, next_obs)
+        return obs_pred, action_pred
+
+    def calc_ir(self, obs, next_obs, action):
+
+        obs_pred, action_pred = self.forward(obs, next_obs, action)
+
+        intrinsic_reward = args.icm_lambda * ((obs_pred - next_obs).pow(2)).mean(dim=1)
+        return intrinsic_reward.data.cpu().numpy()
+
+
 class Scale(nn.Module):
     def __init__(self, scale):
         super().__init__()
@@ -209,13 +270,18 @@ class Agent(nn.Module):
         return self.critic(x)
 
 agent = Agent(envs).to(device)
-optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+icm = ICM(envs).to(device)
+
+inverse_loss = nn.CrossEntropyLoss()
+forward_loss = nn.MSELoss()
+optimizer = optim.Adam(list(agent.parameters()) + list(icm.parameters()), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+next_obss = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
 actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -253,7 +319,10 @@ for update in range(1, num_updates+1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-
+        rewards[step] = 0
+        intrinsic_reward = icm.calc_ir(obs[step], next_obs, action.unsqueeze(1))
+        rewards[step] += torch.Tensor(intrinsic_reward).to(device)
+        next_obss[step] = next_obs
         for info in infos:
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
@@ -295,6 +364,7 @@ for update in range(1, num_updates+1):
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
+    b_next_obss = next_obss.reshape((-1,)+envs.observation_space.shape)
 
     # Optimizaing the policy and value network
     target_agent = Agent(envs).to(device)
@@ -331,8 +401,15 @@ for update in range(1, num_updates+1):
                 v_loss = 0.5 * v_loss_max.mean()
             else:
                 v_loss = 0.5 * ((new_values - b_returns[minibatch_ind]) ** 2).mean()
+            # icm loss
+            dupa = b_next_obss[minibatch_ind]
+            obs_pred, action_pred = icm.forward(b_obs[minibatch_ind], b_next_obss[minibatch_ind], b_actions.long()[minibatch_ind])
 
-            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+            f_loss = forward_loss(obs_pred, b_next_obss[minibatch_ind])
+            i_loss = inverse_loss(action_pred, b_actions.long()[minibatch_ind])
+            icm_loss = (1-args.icm_beta)*i_loss + args.icm_beta*f_loss
+
+            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + icm_loss
 
             optimizer.zero_grad()
             loss.backward()
