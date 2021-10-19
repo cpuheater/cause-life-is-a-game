@@ -321,6 +321,7 @@ for update in range(1, num_updates+1):
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
         rewards[step] = 0
         intrinsic_reward = icm.calc_ir(obs[step], next_obs, action.unsqueeze(1))
+        print(intrinsic_reward)
         rewards[step] += torch.Tensor(intrinsic_reward).to(device)
         next_obss[step] = next_obs
         for info in infos:
@@ -425,6 +426,9 @@ for update in range(1, num_updates+1):
                 break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/inverse_loss", i_loss, global_step)
+    writer.add_scalar("charts/forward_loss", f_loss, global_step)
+    writer.add_scalar("charts/icm_loss", icm_loss, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
     writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
