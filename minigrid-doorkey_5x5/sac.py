@@ -327,8 +327,7 @@ for global_step in range(1, args.total_timesteps+1):
     else:
         action, _ = pg.get_action([obs], device)
     # TRY NOT TO MODIFY: execute the game and log data.
-    dupa = 5 if action == 4 else action
-    next_obs, reward, done, _ = env.step(dupa)
+    next_obs, reward, done, _ = env.step( 5 if action == 4 else action)
     renders.append(env.render(mode='rgb_array'))
     if reward > 0:
         reward = 100

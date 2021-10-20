@@ -229,7 +229,7 @@ class ICM(nn.Module):
         obs_pred, action_pred = self.forward(obs, next_obs, action)
 
         intrinsic_reward = args.icm_lambda * ((obs_pred - next_obs).pow(2)).mean(dim=1)
-        return intrinsic_reward.data.cpu().numpy()
+        return intrinsic_reward
 
 
 class Scale(nn.Module):
@@ -322,7 +322,7 @@ for update in range(1, num_updates+1):
         rewards[step] = 0
         intrinsic_reward = icm.calc_ir(obs[step], next_obs, action.unsqueeze(1))
         print(intrinsic_reward)
-        rewards[step] += torch.Tensor(intrinsic_reward).to(device)
+        rewards[step] += intrinsic_reward.detach()
         next_obss[step] = next_obs
         for info in infos:
             if 'episode' in info.keys():
@@ -403,7 +403,6 @@ for update in range(1, num_updates+1):
             else:
                 v_loss = 0.5 * ((new_values - b_returns[minibatch_ind]) ** 2).mean()
             # icm loss
-            dupa = b_next_obss[minibatch_ind]
             obs_pred, action_pred = icm.forward(b_obs[minibatch_ind], b_next_obss[minibatch_ind], b_actions.long()[minibatch_ind])
 
             f_loss = forward_loss(obs_pred, b_next_obss[minibatch_ind])
@@ -414,7 +413,7 @@ for update in range(1, num_updates+1):
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+            nn.utils.clip_grad_norm_(list(agent.parameters()), args.max_grad_norm)
             optimizer.step()
 
         if args.kle_stop:

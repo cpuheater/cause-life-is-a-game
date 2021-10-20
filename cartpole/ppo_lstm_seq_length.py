@@ -193,7 +193,6 @@ class TrajectoryDataset():
         self.trajectories = {key: value.to(device) for key, value in trajectories.items()}
         self.batch_len = batch_len
         truncated_seq_len = torch.clamp(trajectories["seq_len"] - batch_len + 1, 0, args.num_steps)
-        dupa = np.concatenate((np.array([0]), truncated_seq_len.numpy()))
         self.cumsum_seq_len = np.cumsum(np.concatenate((np.array([0]), truncated_seq_len.numpy())))
         self.batch_size = batch_size
 
@@ -237,7 +236,6 @@ def split_trajectories_episodes(trajectory_tensors):
         for key, value in trajectory_tensors.items():
             # Value includes additional step
             if key == "values":
-                dupa = len_episode[:-1] + [len_episode[-1] + 1]
                 value_split = list(torch.split(value[:, i], len_episode[:-1] + [len_episode[-1] + 1]))
                 # Append extra 0 to values to represent no future reward
                 for j in range(len(value_split) - 1):

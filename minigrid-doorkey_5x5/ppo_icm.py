@@ -18,44 +18,43 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvW
 from gym.envs.classic_control import CartPoleEnv
 from gym import spaces
 import numpy as np
+from gym_minigrid.wrappers import *
 
 
-class CartPoleNoVelEnv(CartPoleEnv):
-    """Variant of CartPoleEnv with velocity information removed. This task requires memory to solve."""
+class ImageToPyTorch(gym.ObservationWrapper):
+    """
+    Image shape to channels x weight x height
+    """
 
-    def __init__(self):
-        super(CartPoleNoVelEnv, self).__init__()
-        high = np.array([
-            self.x_threshold * 2,
-            self.theta_threshold_radians * 2,
-            ])
-        self.observation_space = spaces.Box(-high, high, dtype=np.float32)
+    def __init__(self, env):
+        super(ImageToPyTorch, self).__init__(env)
+        old_shape = self.observation_space.shape
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(old_shape[-1], old_shape[0], old_shape[1]),
+            dtype=np.uint8,
+        )
 
-    @staticmethod
-    def _pos_obs(full_obs):
-        xpos, _xvel, thetapos, _thetavel = full_obs
-        return xpos, thetapos
+    def observation(self, observation):
+        return np.transpose(observation, axes=(2, 0, 1))
 
-    def reset(self):
-        full_obs = super().reset()
-        return CartPoleNoVelEnv._pos_obs(full_obs)
+def wrap_pytorch(env):
+    return ImageToPyTorch(env)
 
-    def step(self, action):
-        full_obs, rew, done, info = super().step(action)
-        return CartPoleNoVelEnv._pos_obs(full_obs), rew, done, info
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="CartPole-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=3e-4,
+    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=100000,
+    parser.add_argument('--total-timesteps', type=int, default=10000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -75,7 +74,7 @@ if __name__ == "__main__":
                         help='the number of mini batch')
     parser.add_argument('--num-envs', type=int, default=4,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=128,
+    parser.add_argument('--num-steps', type=int, default=256,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -113,6 +112,8 @@ if __name__ == "__main__":
                         help='icm beta')
     parser.add_argument('--icm-lambda', type=float, default=1,
                         help='icm lambda')
+    parser.add_argument('--icm-feature-encoder-size', type=float, default=126,
+                        help='icm')
 
     args = parser.parse_args()
     if not args.seed:
@@ -120,6 +121,37 @@ if __name__ == "__main__":
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
+
+class InfoWrapper(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        self._rewards = []
+
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        self._rewards = []
+        return obs["image"]
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        self._rewards.append(reward)
+        vis_obs = obs["image"]
+
+        if done:
+            print(f"rewards: {sum(self._rewards)}")
+            info = {"reward": sum(self._rewards),
+                    "length": len(self._rewards)}
+
+        return vis_obs, reward, done, info
+
+class WarpFrame(gym.ObservationWrapper):
+    def __init__(self, env, width=84, height=84):
+        super().__init__(env)
+        self.observation_space = env.observation_space.spaces['image']
+        self.action_space = Discrete(5)
+
+    def observation(self, obs):
+        return obs
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -157,20 +189,22 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-def make_env(gym_id, seed, idx):
+def make_env(seed):
     def thunk():
-
-        env = gym.make(gym_id) #CartPoleNoVelEnv()
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        if args.capture_video:
-            if idx == 0:
-                env = Monitor(env, f'videos/{experiment_name}')
+        env = gym.make(args.gym_id)
+        env = InfoWrapper(env)
+        env = WarpFrame(env)
+        env = wrap_pytorch(env)
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
     return thunk
-envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
+
+envs = VecPyTorch(
+    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+    device
+)
 # if args.prod_mode:
 #     envs = VecPyTorch(
 #         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
@@ -179,11 +213,29 @@ envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in ra
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
+class FeatureEncoder(nn.Module):
+    def __init__(self, channels):
+        super(FeatureEncoder, self).__init__()
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(channels, 16, kernel_size=(1, 1), padding=0)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(980, args.icm_feature_encoder_size)),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        x = self.network(x)
+        return x
+
+
 class InverseModel(nn.Module):
     def __init__(self, envs):
         super(InverseModel, self).__init__()
         self.network = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.observation_space.shape).prod() * 2, 256)),
+            layer_init(nn.Linear(args.icm_feature_encoder_size * 2, 256)),
             nn.ReLU(),
             layer_init(nn.Linear(256, envs.action_space.n))
         )
@@ -196,9 +248,9 @@ class ForwardModel(nn.Module):
     def __init__(self, envs):
         super(ForwardModel, self).__init__()
         self.network = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.observation_space.shape).prod() + envs.action_space.n, 256)),
+            layer_init(nn.Linear(args.icm_feature_encoder_size + envs.action_space.n, 256)),
             nn.ReLU(),
-            layer_init(nn.Linear(256, np.array(envs.observation_space.shape).prod()))
+            layer_init(nn.Linear(256, args.icm_feature_encoder_size))
         )
         self.action_space = envs.action_space.n
 
@@ -217,19 +269,21 @@ class ICM(nn.Module):
         super(ICM, self).__init__()
         self.forward_model = ForwardModel(envs)
         self.inverse_model = InverseModel(envs)
-
+        self.feature_encoder = FeatureEncoder(3)
 
     def forward(self, obs, next_obs, action):
-        obs_pred = self.forward_model(obs, action)
-        action_pred = self.inverse_model(obs, next_obs)
-        return obs_pred, action_pred
+        obs_features = self.feature_encoder(obs)
+        next_obs_features = self.feature_encoder(next_obs)
+        obs_next_pred = self.forward_model(obs_features.detach(), action.detach())
+        action_pred = self.inverse_model(obs_features, next_obs_features)
+        return obs_next_pred, action_pred, next_obs_features
 
-    def calc_ir(self, obs, next_obs, action):
+    def  calc_ir(self, obs, next_obs, action):
 
-        obs_pred, action_pred = self.forward(obs, next_obs, action)
+        obs_pred, action_pred, next_obs_features = self.forward(obs, next_obs, action)
 
-        intrinsic_reward = args.icm_lambda * ((obs_pred - next_obs).pow(2)).mean(dim=1)
-        return intrinsic_reward.data.cpu().numpy()
+        intrinsic_reward = args.icm_alpha * ((obs_pred - next_obs_features).pow(2)).mean(dim=1)
+        return intrinsic_reward
 
 
 class Scale(nn.Module):
@@ -246,19 +300,26 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.observation_space.shape).prod(), 256)),
+            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
-            layer_init(nn.Linear(256, 256)),
+            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(980, 124)),
             nn.ReLU()
         )
-        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+        self.actor = layer_init(nn.Linear(124, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(124, 1), std=1)
+
+    def forward(self, x):
+        return self.network(x)
 
     def get_action(self, x, action=None):
-        x = self.network(x)
+        x = self.forward(x)
+        value = self.critic(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
@@ -266,8 +327,7 @@ class Agent(nn.Module):
         return action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x):
-        x = self.network(x)
-        return self.critic(x)
+        return self.critic(self.forward(x))
 
 agent = Agent(envs).to(device)
 icm = ICM(envs).to(device)
@@ -322,7 +382,7 @@ for update in range(1, num_updates+1):
         rewards[step] = 0
         intrinsic_reward = icm.calc_ir(obs[step], next_obs, action.unsqueeze(1))
         print(intrinsic_reward)
-        rewards[step] += torch.Tensor(intrinsic_reward).to(device)
+        rewards[step] += intrinsic_reward
         next_obss[step] = next_obs
         for info in infos:
             if 'episode' in info.keys():
@@ -403,14 +463,13 @@ for update in range(1, num_updates+1):
             else:
                 v_loss = 0.5 * ((new_values - b_returns[minibatch_ind]) ** 2).mean()
             # icm loss
-            dupa = b_next_obss[minibatch_ind]
-            obs_pred, action_pred = icm.forward(b_obs[minibatch_ind], b_next_obss[minibatch_ind], b_actions.long()[minibatch_ind])
+            obs_next_pred, action_pred, next_obs_features = icm.forward(b_obs[minibatch_ind], b_next_obss[minibatch_ind], b_actions.long()[minibatch_ind])
 
-            f_loss = forward_loss(obs_pred, b_next_obss[minibatch_ind])
+            f_loss = forward_loss(obs_next_pred, next_obs_features)
             i_loss = inverse_loss(action_pred, b_actions.long()[minibatch_ind])
             icm_loss = (1-args.icm_beta)*i_loss + args.icm_beta*f_loss
 
-            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + icm_loss
+            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + args.icm_lambda*icm_loss
 
             optimizer.zero_grad()
             loss.backward()
