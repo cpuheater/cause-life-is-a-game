@@ -319,7 +319,6 @@ class Agent(nn.Module):
 
     def get_action(self, x, action=None):
         x = self.forward(x)
-        value = self.critic(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
@@ -375,13 +374,12 @@ for update in range(1, num_updates+1):
 
         actions[step] = action
         logprobs[step] = logproba
-
         # TRY NOT TO MODIFY: execute the game and log data.
+        action[action == 4] = 5
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-        rewards[step] = 0
-        intrinsic_reward = icm.calc_ir(obs[step], next_obs, action.unsqueeze(1))
-        print(intrinsic_reward)
+        #rewards[step] = 0
+        intrinsic_reward = icm.calc_ir(obs[step], next_obs, actions[step].long().unsqueeze(1))
         rewards[step] += intrinsic_reward
         next_obss[step] = next_obs
         for info in infos:
