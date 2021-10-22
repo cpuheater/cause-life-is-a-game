@@ -106,8 +106,8 @@ if __name__ == "__main__":
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
     parser.add_argument('--icm-enabled', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='enable ICM')
-    parser.add_argument('--icm-alpha', type=float, default=0.5,
-                        help="icm alpha")
+    parser.add_argument('--icm-eta', type=float, default=0.5,
+                        help="icm eta")
     parser.add_argument('--icm-beta', type=float, default=0.2,
                         help='icm beta')
     parser.add_argument('--icm-lambda', type=float, default=1,
@@ -282,7 +282,7 @@ class ICM(nn.Module):
 
         obs_pred, action_pred, next_obs_features = self.forward(obs, next_obs, action)
 
-        intrinsic_reward = args.icm_alpha * ((obs_pred - next_obs_features).pow(2)).mean(dim=1)
+        intrinsic_reward = args.icm_eta * ((obs_pred - next_obs_features).pow(2)).mean(dim=1)
         return intrinsic_reward
 
 
@@ -378,7 +378,7 @@ for update in range(1, num_updates+1):
         action[action == 4] = 5
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-        #rewards[step] = 0
+        rewards[step] = 0
         intrinsic_reward = icm.calc_ir(obs[step], next_obs, actions[step].long().unsqueeze(1))
         rewards[step] += intrinsic_reward
         next_obss[step] = next_obs
