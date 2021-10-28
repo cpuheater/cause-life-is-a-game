@@ -16,25 +16,266 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
+from gym import spaces, RewardWrapper, ObservationWrapper
 import argparse
 from distutils.util import strtobool
 import numpy as np
 import gym
 from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import vizdoomgym
+from gym import spaces, RewardWrapper, ObservationWrapper
+
+class ImageToPyTorch(gym.ObservationWrapper):
+    """
+    Image shape to channels x weight x height
+    """
+
+    def __init__(self, env):
+        super(ImageToPyTorch, self).__init__(env)
+        old_shape = self.observation_space.shape
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(old_shape[-1], old_shape[0], old_shape[1]),
+            dtype=np.uint8,
+        )
+
+    def observation(self, observation):
+        return np.transpose(observation, axes=(2, 0, 1))
+
+def wrap_pytorch(env):
+    return ImageToPyTorch(env)
+
+
+
+def unwrap_env(wrapped_env):
+    return wrapped_env.unwrapped
+
+
+def has_image_observations(observation_space):
+    """It's a heuristic."""
+    return len(observation_space.shape) >= 2
+
+
+class StackFramesWrapper(gym.core.Wrapper):
+    """
+    Gym env wrapper to stack multiple frames.
+    Useful for training feed-forward agents on dynamic games.
+    """
+
+    def __init__(self, env, stack_past_frames):
+        super(StackFramesWrapper, self).__init__(env)
+        if len(env.observation_space.shape) not in [1, 2]:
+            raise Exception('Stack frames works with vector observations and 2D single channel images')
+        self._stack_past = stack_past_frames
+        self._frames = None
+
+        self._image_obs = has_image_observations(env.observation_space)
+
+        if self._image_obs:
+            new_obs_space_shape = env.observation_space.shape + (stack_past_frames,)
+        else:
+            new_obs_space_shape = list(env.observation_space.shape)
+            new_obs_space_shape[0] *= stack_past_frames
+
+        self.observation_space = spaces.Box(
+            0.0 if self._image_obs else env.observation_space.low[0],
+            1.0 if self._image_obs else env.observation_space.high[0],
+            shape=new_obs_space_shape,
+            dtype=np.float32,
+        )
+
+    def _render_stacked_frames(self):
+        if self._image_obs:
+            return np.transpose(numpy_all_the_way(self._frames), axes=[1, 2, 0])
+        else:
+            return np.array(self._frames).flatten()
+
+    def reset(self):
+        observation = self.env.reset()
+        self._frames = deque([np.zeros_like(observation)] * (self._stack_past - 1))
+        self._frames.append(observation)
+        return self._render_stacked_frames()
+
+    def step(self, action):
+        new_observation, reward, done, info = self.env.step(action)
+        self._frames.popleft()
+        self._frames.append(new_observation)
+        return self._render_stacked_frames(), reward, done, info
+
+def numpy_all_the_way(list_of_arrays):
+    """Turn a list of numpy arrays into a 2D numpy array."""
+    shape = list(list_of_arrays[0].shape)
+    shape[:0] = [len(list_of_arrays)]
+    arr = np.concatenate(list_of_arrays).reshape(shape)
+    return arr
+
+class SkipAndStackFramesWrapper(StackFramesWrapper):
+    """Wrapper for action repeat + stack multiple frames to capture dynamics."""
+
+    def __init__(self, env, num_frames=4):
+        super(SkipAndStackFramesWrapper, self).__init__(env, stack_past_frames=num_frames)
+        self._skip_frames = num_frames
+
+    def step(self, action):
+        done = False
+        total_reward, num_frames = 0, 0
+        for i in range(self._skip_frames):
+            new_observation, reward, done, info = self.env.step(action)
+            num_frames += 1
+            total_reward += reward
+            self._frames.popleft()
+            self._frames.append(new_observation)
+            if done:
+                break
+
+        info['num_frames'] = num_frames
+        return self._render_stacked_frames(), total_reward, done, info
+
+
+class NormalizeWrapper(gym.core.Wrapper):
+    """
+    For environments with vector lowdim input.
+
+    """
+
+    def __init__(self, env):
+        super(NormalizeWrapper, self).__init__(env)
+        if len(env.observation_space.shape) != 1:
+            raise Exception('NormalizeWrapper only works with lowdimensional envs')
+
+        self.wrapped_env = env
+        self._normalize_to = 1.0
+
+        self._mean = (env.observation_space.high + env.observation_space.low) * 0.5
+        self._max = env.observation_space.high
+
+        self.observation_space = spaces.Box(
+            -self._normalize_to, self._normalize_to, shape=env.observation_space.shape, dtype=np.float32,
+        )
+
+    def _normalize(self, obs):
+        obs -= self._mean
+        obs *= self._normalize_to / (self._max - self._mean)
+        return obs
+
+    def reset(self):
+        observation = self.env.reset()
+        return self._normalize(observation)
+
+    def step(self, action):
+        observation, reward, done, info = self.env.step(action)
+        return self._normalize(observation), reward, done, info
+
+    @property
+    def range(self):
+        return [-self._normalize_to, self._normalize_to]
+
+
+class ResizeAndGrayscaleWrapper(gym.core.Wrapper):
+    """Resize observation frames to specified (w,h) and convert to grayscale."""
+
+    def __init__(self, env, w, h):
+        super(ResizeAndGrayscaleWrapper, self).__init__(env)
+        self.observation_space = spaces.Box(0.0, 1.0, shape=[w, h], dtype=np.float32)
+        self.w = w
+        self.h = h
+
+    def _observation(self, obs):
+        obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+        obs = cv2.resize(obs, (self.w, self.h), interpolation=cv2.INTER_AREA)
+        obs = obs.astype(np.float32) / 255.0
+        return obs
+
+    def reset(self):
+        return self._observation(self.env.reset())
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        return self._observation(obs), reward, done, info
+
+
+class RewardScalingWrapper(RewardWrapper):
+    def __init__(self, env, scaling_factor):
+        super(RewardScalingWrapper, self).__init__(env)
+        self._scaling = scaling_factor
+        self.reward_range = (r * scaling_factor for r in self.reward_range)
+
+    def reward(self, reward):
+        return reward * self._scaling
+
+
+class TimeLimitWrapper(gym.core.Wrapper):
+    terminated_by_timer = 'terminated_by_timer'
+
+    def __init__(self, env, limit, random_variation_steps=0):
+        super(TimeLimitWrapper, self).__init__(env)
+        self._limit = limit
+        self._variation_steps = random_variation_steps
+        self._num_steps = 0
+        self._terminate_in = self._random_limit()
+
+    def _random_limit(self):
+        return np.random.randint(-self._variation_steps, self._variation_steps + 1) + self._limit
+
+    def reset(self):
+        self._num_steps = 0
+        self._terminate_in = self._random_limit()
+        return self.env.reset()
+
+    def step(self, action):
+        observation, reward, done, info = self.env.step(action)
+        self._num_steps += 1
+        if not done:
+            if self._num_steps >= self._terminate_in:
+                done = True
+                info[self.terminated_by_timer] = True
+
+        return observation, reward, done, info
+
+
+class RemainingTimeWrapper(ObservationWrapper):
+    """Designed to be used together with TimeLimitWrapper."""
+
+    def __init__(self, env):
+        super(RemainingTimeWrapper, self).__init__(env)
+
+        # adding an additional input dimension to indicate time left before the end of episode
+        self.observation_space = spaces.Dict({
+            'timer': spaces.Box(0.0, 1.0, shape=[1], dtype=np.float32),
+            'obs': env.observation_space,
+        })
+
+        wrapped_env = env
+        while not isinstance(wrapped_env, TimeLimitWrapper):
+            wrapped_env = wrapped_env.env
+            if not isinstance(wrapped_env, gym.core.Wrapper):
+                raise Exception('RemainingTimeWrapper is supposed to wrap TimeLimitWrapper')
+        self.time_limit_wrapper = wrapped_env
+
+    def observation(self, observation):
+        num_steps = self.time_limit_wrapper._num_steps
+        terminate_in = self.time_limit_wrapper._terminate_in
+
+        dict_obs = {
+            'timer': num_steps / terminate_in,
+            'obs': observation,
+        }
+        return dict_obs
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="basic",
+    parser.add_argument('--gym-id', type=str, default="VizdoomBasic-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -176,7 +417,7 @@ class VecPyTorch(VecEnvWrapper):
 
     def reset(self):
         obs = self.venv.reset()
-        obs = torch.from_numpy(obs).float().to(self.device)
+        obs = torch.from_numpy(np.transpose(obs, axes=(2, 0, 1))).float().to(self.device)
         return obs
 
     def step_async(self, actions):
@@ -185,7 +426,7 @@ class VecPyTorch(VecEnvWrapper):
 
     def step_wait(self):
         obs, reward, done, info = self.venv.step_wait()
-        obs = torch.from_numpy(obs).float().to(self.device)
+        obs = torch.from_numpy(np.transpose(obs, axes=(2, 0, 1))).float().to(self.device)
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
 
@@ -205,7 +446,7 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-def make_env(seed):
+def make_env2(seed):
     def thunk():
         env = ViZDoomEnv(seed, args.gym_id, render=False, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
         env.action_space.seed(seed)
@@ -213,12 +454,37 @@ def make_env(seed):
         return env
     return thunk
 
-#envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
+
+
+
+def make_env(seed):
+   def thunk():
+        env = gym.make(args.gym_id)
+        env.seed()
+        env = ResizeAndGrayscaleWrapper(env, 112, 64)
+
+        #timeout = doom_cfg.default_timeout - 10
+        #env = TimeLimitWrapper(env, limit=timeout, random_variation_steps=5)
+
+        env = SkipAndStackFramesWrapper(env, num_frames=4)
+
+        #env = RewardScalingWrapper(env, 1)
+        #env = RemainingTimeWrapper(env)
+        env.seed(seed)
+        env.action_space.seed(seed)
+        env.observation_space.seed(seed)
+        return env
+   return thunk
+
+
+
+
+envs = VecPyTorch(DummyVecEnv([make_env(args.seed+i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
-envs = VecPyTorch(
-    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-    device
-)
+#envs = VecPyTorch(
+#    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+#    device
+#)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
