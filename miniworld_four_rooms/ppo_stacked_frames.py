@@ -25,6 +25,8 @@ class MaxAndSkipEnv(gym.Wrapper):
             total_reward += reward
             if done:
                 break
+        # Note that the observation on the done=True frame
+        # doesn't matter
 
         return obs, total_reward, done, info
 
@@ -41,7 +43,7 @@ class ClipRewardEnv(gym.RewardWrapper):
 
 
 class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=112, height=64, grayscale=False, dict_space_key=None):
+    def __init__(self, env, width=112, height=64, grayscale=True, dict_space_key=None):
         super().__init__(env)
         self._width = width
         self._height = height
@@ -225,7 +227,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniWorld-Hallway-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniWorld-FourRooms-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -337,7 +339,7 @@ def make_env(gym_id, seed, idx):
             wrap_deepmind(
                 env,
                 clip_rewards=False,
-                frame_stack=False,
+                frame_stack=True,
                 scale=False,
             )
         )
@@ -368,89 +370,21 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-import torch as T
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-class ICM(nn.Module):
-    def __init__(self, input_dims, n_actions=3, alpha=0.1, beta=0.2):
-        super(ICM, self).__init__()
-        self.alpha = alpha
-        self.beta = beta
-
-        self.conv1 = nn.Conv2d(input_dims[0], 32, 3, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
-        self.phi = nn.Conv2d(32, 32, 3, stride=2, padding=1)
-
-        self.inverse = nn.Linear(288*2, 256)
-        self.pi_logits = nn.Linear(256, n_actions)
-
-        self.dense1 = nn.Linear(288+1, 256)
-        self.phi_hat_new = nn.Linear(256, 288)
-
-        device = T.device('cpu')
-        self.to(device)
-
-    def forward(self, state, new_state, action):
-        conv = F.elu(self.conv1(state))
-        conv = F.elu(self.conv2(conv))
-        conv = F.elu(self.conv3(conv))
-        phi = self.phi(conv)
-
-        conv_new = F.elu(self.conv1(new_state))
-        conv_new = F.elu(self.conv2(conv_new))
-        conv_new = F.elu(self.conv3(conv_new))
-        phi_new = self.phi(conv_new)
-
-        # [T, 32, 3, 3] to [T, 288]
-        phi = phi.view(phi.size()[0], -1).to(T.float)
-        phi_new = phi_new.view(phi_new.size()[0], -1).to(T.float)
-
-        inverse = self.inverse(T.cat([phi, phi_new], dim=1))
-        pi_logits = self.pi_logits(inverse)
-
-        # from [T] to [T, 1]
-        action = action.reshape((action.size()[0], 1))
-        forward_input = T.cat([phi, action], dim=1)
-        dense = self.dense1(forward_input)
-        phi_hat_new = self.phi_hat_new(dense)
-
-        return phi_new, pi_logits, phi_hat_new
-
-    def calc_loss(self, states, new_states, actions):
-        # don't need [] b/c these are lists of states
-        states = T.tensor(states, dtype=T.float)
-        actions = T.tensor(actions, dtype=T.float)
-        new_states = T.tensor(new_states, dtype=T.float)
-
-        phi_new, pi_logits, phi_hat_new = \
-            self.forward(states, new_states, actions)
-
-        inverse_loss = nn.CrossEntropyLoss()
-        L_I = (1 - self.beta) * inverse_loss(pi_logits, actions.to(T.long))
-
-        forward_loss = nn.MSELoss()
-        L_F = self.beta * forward_loss(phi_hat_new, phi_new)
-
-        intrinsic_reward = self.alpha*0.5*((phi_hat_new-phi_new).pow(2)).mean(dim=1)
-        return intrinsic_reward, L_I, L_F
-
-
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3):
+    def __init__(self, envs, frames=4):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),
-            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(frames, 32, 3, stride=2, padding=1)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            layer_init(nn.Conv2d(32, 32, 3, stride=2, padding=1)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            layer_init(nn.Conv2d(32, 32, 3, stride=2, padding=1)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 32, 3, stride=2, padding=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(896, 512)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)

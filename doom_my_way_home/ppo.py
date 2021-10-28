@@ -5,201 +5,10 @@ from collections import deque
 import gym
 from gym import spaces
 import cv2
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
+import skimage.transform
+
 cv2.ocl.setUseOpenCL(False)
-import gym_miniworld
-
-class MaxAndSkipEnv(gym.Wrapper):
-    def __init__(self, env, skip=4):
-        """Return only every `skip`-th frame"""
-        gym.Wrapper.__init__(self, env)
-        # most recent raw observations (for max pooling across time steps)
-        self._obs_buffer = np.zeros((2,)+env.observation_space.shape, dtype=np.uint8)
-        self._skip       = skip
-
-    def step(self, action):
-        """Repeat action, sum reward, and max over last observations."""
-        total_reward = 0.0
-        done = None
-        for i in range(self._skip):
-            obs, reward, done, info = self.env.step(action)
-            total_reward += reward
-            if done:
-                break
-
-        return obs, total_reward, done, info
-
-    def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
-
-class ClipRewardEnv(gym.RewardWrapper):
-    def __init__(self, env):
-        gym.RewardWrapper.__init__(self, env)
-
-    def reward(self, reward):
-        """Bin reward to {+1, 0, -1} by its sign."""
-        return np.sign(reward)
-
-
-class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=112, height=64, grayscale=False, dict_space_key=None):
-        super().__init__(env)
-        self._width = width
-        self._height = height
-        self._grayscale = grayscale
-        self._key = dict_space_key
-        if self._grayscale:
-            num_colors = 1
-        else:
-            num_colors = 3
-
-        new_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(self._height, self._width, num_colors),
-            dtype=np.uint8,
-        )
-        if self._key is None:
-            original_space = self.observation_space
-            self.observation_space = new_space
-        else:
-            original_space = self.observation_space.spaces[self._key]
-            self.observation_space.spaces[self._key] = new_space
-        assert original_space.dtype == np.uint8 and len(original_space.shape) == 3
-
-    def observation(self, obs):
-        if self._key is None:
-            frame = obs
-        else:
-            frame = obs[self._key]
-
-        if self._grayscale:
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        frame = cv2.resize(
-            frame, (self._width, self._height), interpolation=cv2.INTER_AREA
-        )
-        if self._grayscale:
-            frame = np.expand_dims(frame, -1)
-
-        if self._key is None:
-            obs = frame
-        else:
-            obs = obs.copy()
-            obs[self._key] = frame
-        return obs
-
-
-class FrameStack(gym.Wrapper):
-    def __init__(self, env, k):
-        """Stack k last frames.
-        Returns lazy array, which is much more memory efficient.
-        See Also
-        --------
-        baselines.common.atari_wrappers.LazyFrames
-        """
-        gym.Wrapper.__init__(self, env)
-        self.k = k
-        self.frames = deque([], maxlen=k)
-        shp = env.observation_space.shape
-        self.observation_space = spaces.Box(low=0, high=255, shape=(shp[:-1] + (shp[-1] * k,)), dtype=env.observation_space.dtype)
-
-    def reset(self):
-        ob = self.env.reset()
-        for _ in range(self.k):
-            self.frames.append(ob)
-        return self._get_ob()
-
-    def step(self, action):
-        ob, reward, done, info = self.env.step(action)
-        self.frames.append(ob)
-        return self._get_ob(), reward, done, info
-
-    def _get_ob(self):
-        assert len(self.frames) == self.k
-        return LazyFrames(list(self.frames))
-
-class ScaledFloatFrame(gym.ObservationWrapper):
-    def __init__(self, env):
-        gym.ObservationWrapper.__init__(self, env)
-        self.observation_space = gym.spaces.Box(low=0, high=1, shape=env.observation_space.shape, dtype=np.float32)
-
-    def observation(self, observation):
-        # careful! This undoes the memory optimization, use
-        # with smaller replay buffers only.
-        return np.array(observation).astype(np.float32) / 255.0
-
-class LazyFrames(object):
-    def __init__(self, frames):
-        """This object ensures that common frames between the observations are only stored once.
-        It exists purely to optimize memory usage which can be huge for DQN's 1M frames replay
-        buffers.
-        This object should only be converted to numpy array before being passed to the model.
-        You'd not believe how complex the previous solution was."""
-        self._frames = frames
-        self._out = None
-
-    def _force(self):
-        if self._out is None:
-            self._out = np.concatenate(self._frames, axis=-1)
-            self._frames = None
-        return self._out
-
-    def __array__(self, dtype=None):
-        out = self._force()
-        if dtype is not None:
-            out = out.astype(dtype)
-        return out
-
-    def __len__(self):
-        return len(self._force())
-
-    def __getitem__(self, i):
-        return self._force()[i]
-
-    def count(self):
-        frames = self._force()
-        return frames.shape[frames.ndim - 1]
-
-    def frame(self, i):
-        return self._force()[..., i]
-
-def wrap_atari(env, max_episode_steps=None):
-    env = MaxAndSkipEnv(env, skip=4)
-
-    return env
-
-def wrap_deepmind(env, clip_rewards=True, frame_stack=False, scale=False):
-    """Configure environment for DeepMind-style Atari.
-    """
-    env = WarpFrame(env)
-    if scale:
-        env = ScaledFloatFrame(env)
-    if clip_rewards:
-        env = ClipRewardEnv(env)
-    if frame_stack:
-        env = FrameStack(env, 4)
-    return env
-
-
-class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
-
-    def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.uint8,
-        )
-
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
-
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
 
 import torch
 import torch.nn as nn
@@ -225,13 +34,13 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniWorld-Hallway-v0",
+    parser.add_argument('--gym-id', type=str, default="my_way_home",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total-timesteps', type=int, default=50000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -245,6 +54,10 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
+    parser.add_argument('--scale-reward', type=float, default=0.01,
+                        help='scale reward')
+    parser.add_argument('--frame-skip', type=int, default=4,
+                        help='frame skip')
 
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
@@ -266,28 +79,95 @@ if __name__ == "__main__":
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
-                        help="the K epochs to update the policy")
+                         help="the K epochs to update the policy")
     parser.add_argument('--kle-stop', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                        help='If toggled, the policy updates will be early stopped w.r.t target-kl')
+                         help='If toggled, the policy updates will be early stopped w.r.t target-kl')
     parser.add_argument('--kle-rollback', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                        help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
+                         help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
     parser.add_argument('--target-kl', type=float, default=0.03,
-                        help='the target-kl variable that is referred by --kl')
+                         help='the target-kl variable that is referred by --kl')
     parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                        help='Use GAE for advantage computation')
+                         help='Use GAE for advantage computation')
     parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                        help="Toggles advantages normalization")
+                          help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                        help="Toggle learning rate annealing for policy and value networks")
+                          help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                        help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+                          help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    #if not args.seed:
+    args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
+
+
+class ViZDoomEnv:
+    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
+        # assign observation space
+        channel_num = 3
+
+        self.observation_shape = (channel_num, 64, 112)
+        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
+        self.reward_scale = reward_scale
+        game = DoomGame()
+
+        game.load_config(f"./scenarios/{game_config}.cfg")
+        game.set_screen_resolution(ScreenResolution.RES_160X120)
+        game.set_screen_format(ScreenFormat.CRCGCB)
+
+        num_buttons = game.get_available_buttons_size()
+        self.action_space = Discrete(num_buttons)
+        actions = [([False] * num_buttons) for i in range(num_buttons)]
+        for i in range(num_buttons):
+            actions[i][i] = True
+        self.actions = actions
+        self.frame_skip = frame_skip
+
+        game.set_seed(seed)
+        game.set_window_visible(render)
+        game.init()
+
+        self.game = game
+
+    def get_current_input(self):
+        state = self.game.get_state()
+        res_source = []
+        res_source.append(state.screen_buffer)
+        res = np.vstack(res_source)
+        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
+        self.last_input = res
+        return res
+
+    def step(self, action):
+        info = {}
+        reward = self.game.make_action(self.actions[action], self.frame_skip)
+        done = self.game.is_episode_finished()
+        if done:
+            ob = self.last_input
+        else:
+            ob = self.get_current_input()
+        # reward scaling
+        reward = reward * self.reward_scale
+        self.total_reward += reward
+        self.total_length += 1
+
+        if done:
+            info['Episode_Total_Reward'] = self.total_reward
+            info['Episode_Total_Len'] = self.total_length
+
+        return ob, reward, done, info
+
+    def reset(self):
+        self.game.new_episode()
+        self.total_reward = 0
+        self.total_length = 0
+        ob = self.get_current_input()
+        return ob
+
+    def close(self):
+        self.game.close()
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -313,7 +193,7 @@ class VecPyTorch(VecEnvWrapper):
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
-    '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+        '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
@@ -325,33 +205,20 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-def make_env(gym_id, seed, idx):
+def make_env(seed):
     def thunk():
-        env = gym.make(gym_id)
-        env = wrap_atari(env)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        if args.capture_video:
-            if idx == 0:
-                env = Monitor(env, f'videos/{experiment_name}')
-        env = wrap_pytorch(
-            wrap_deepmind(
-                env,
-                clip_rewards=False,
-                frame_stack=False,
-                scale=False,
-            )
-        )
-        env.seed(seed)
+        env = ViZDoomEnv(seed, args.gym_id, render=False, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
     return thunk
-envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
+
+#envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
-#     envs = VecPyTorch(
-#         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
-#         device
-#     )
+envs = VecPyTorch(
+         SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+         device
+     )
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
@@ -367,76 +234,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
-
-import torch as T
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-class ICM(nn.Module):
-    def __init__(self, input_dims, n_actions=3, alpha=0.1, beta=0.2):
-        super(ICM, self).__init__()
-        self.alpha = alpha
-        self.beta = beta
-
-        self.conv1 = nn.Conv2d(input_dims[0], 32, 3, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
-        self.phi = nn.Conv2d(32, 32, 3, stride=2, padding=1)
-
-        self.inverse = nn.Linear(288*2, 256)
-        self.pi_logits = nn.Linear(256, n_actions)
-
-        self.dense1 = nn.Linear(288+1, 256)
-        self.phi_hat_new = nn.Linear(256, 288)
-
-        device = T.device('cpu')
-        self.to(device)
-
-    def forward(self, state, new_state, action):
-        conv = F.elu(self.conv1(state))
-        conv = F.elu(self.conv2(conv))
-        conv = F.elu(self.conv3(conv))
-        phi = self.phi(conv)
-
-        conv_new = F.elu(self.conv1(new_state))
-        conv_new = F.elu(self.conv2(conv_new))
-        conv_new = F.elu(self.conv3(conv_new))
-        phi_new = self.phi(conv_new)
-
-        # [T, 32, 3, 3] to [T, 288]
-        phi = phi.view(phi.size()[0], -1).to(T.float)
-        phi_new = phi_new.view(phi_new.size()[0], -1).to(T.float)
-
-        inverse = self.inverse(T.cat([phi, phi_new], dim=1))
-        pi_logits = self.pi_logits(inverse)
-
-        # from [T] to [T, 1]
-        action = action.reshape((action.size()[0], 1))
-        forward_input = T.cat([phi, action], dim=1)
-        dense = self.dense1(forward_input)
-        phi_hat_new = self.phi_hat_new(dense)
-
-        return phi_new, pi_logits, phi_hat_new
-
-    def calc_loss(self, states, new_states, actions):
-        # don't need [] b/c these are lists of states
-        states = T.tensor(states, dtype=T.float)
-        actions = T.tensor(actions, dtype=T.float)
-        new_states = T.tensor(new_states, dtype=T.float)
-
-        phi_new, pi_logits, phi_hat_new = \
-            self.forward(states, new_states, actions)
-
-        inverse_loss = nn.CrossEntropyLoss()
-        L_I = (1 - self.beta) * inverse_loss(pi_logits, actions.to(T.long))
-
-        forward_loss = nn.MSELoss()
-        L_F = self.beta * forward_loss(phi_hat_new, phi_new)
-
-        intrinsic_reward = self.alpha*0.5*((phi_hat_new-phi_new).pow(2)).mean(dim=1)
-        return intrinsic_reward, L_I, L_F
-
 
 class Agent(nn.Module):
     def __init__(self, envs, frames=3):
@@ -460,11 +257,13 @@ class Agent(nn.Module):
         return self.network(x)
 
     def get_action(self, x, action=None):
-        logits = self.actor(self.forward(x))
+        x = self.forward(x)
+        value = self.critic(x)
+        logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy()
+        return value, action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x):
         return self.critic(self.forward(x))
@@ -505,9 +304,9 @@ for update in range(1, num_updates+1):
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            values[step] = agent.get_value(obs[step]).flatten()
-            action, logproba, _ = agent.get_action(obs[step])
+            value, action, logproba, _ = agent.get_action(obs[step])
 
+        values[step] = value.flatten()
         actions[step] = action
         logprobs[step] = logproba
 
@@ -515,11 +314,16 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
+        #for info in infos:
+        #    if 'episode' in info.keys():
+        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+        #        break
         for info in infos:
-            if 'episode' in info.keys():
-                print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-                writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
-                break
+            if 'Episode_Total_Reward' in info.keys():
+                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
+            if 'Episode_Total_Len' in info.keys():
+                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
@@ -570,7 +374,7 @@ for update in range(1, num_updates+1):
             if args.norm_adv:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-            _, newlogproba, entropy = agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
+            _, _, newlogproba, entropy = agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
             # Stats

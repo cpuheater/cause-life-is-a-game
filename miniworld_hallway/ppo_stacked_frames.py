@@ -43,7 +43,7 @@ class ClipRewardEnv(gym.RewardWrapper):
 
 
 class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=42, height=42, grayscale=False, dict_space_key=None):
+    def __init__(self, env, width=112, height=64, grayscale=True, dict_space_key=None):
         super().__init__(env)
         self._width = width
         self._height = height
@@ -384,7 +384,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(32, 32, 3, stride=2, padding=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(896, 512)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
