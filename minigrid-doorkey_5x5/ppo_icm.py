@@ -278,7 +278,7 @@ class ICM(nn.Module):
         action_pred = self.inverse_model(obs_features, next_obs_features)
         return obs_next_pred, action_pred, next_obs_features
 
-    def  calc_ir(self, obs, next_obs, action):
+    def compute_ir(self, obs, next_obs, action):
 
         obs_pred, action_pred, next_obs_features = self.forward(obs, next_obs, action)
 
@@ -378,15 +378,17 @@ for update in range(1, num_updates+1):
         action[action == 4] = 5
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-        rewards[step] = 0
-        intrinsic_reward = icm.calc_ir(obs[step], next_obs, actions[step].long().unsqueeze(1))
-        rewards[step] += intrinsic_reward
+        #rewards[step] = 0
+        with torch.no_grad():
+            intrinsic_reward = icm.compute_ir(obs[step], next_obs, actions[step].long().unsqueeze(1))
+        rewards[step] += intrinsic_reward.detach()
         next_obss[step] = next_obs
         for info in infos:
-            if 'episode' in info.keys():
-                print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-                writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
-                break
+            if info and 'reward' in info.keys():
+                writer.add_scalar("charts/intrinsic_reward", torch.mean(intrinsic_reward), global_step)
+                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
+            if info and 'length' in info.keys():
+                writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():

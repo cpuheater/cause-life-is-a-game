@@ -224,7 +224,7 @@ class ICM(nn.Module):
         action_pred = self.inverse_model(obs, next_obs)
         return obs_pred, action_pred
 
-    def calc_ir(self, obs, next_obs, action):
+    def compute_ir(self, obs, next_obs, action):
 
         obs_pred, action_pred = self.forward(obs, next_obs, action)
 
@@ -320,7 +320,7 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
         rewards[step] = 0
-        intrinsic_reward = icm.calc_ir(obs[step], next_obs, action.unsqueeze(1))
+        intrinsic_reward = icm.compute_ir(obs[step], next_obs, action.unsqueeze(1))
         print(intrinsic_reward)
         rewards[step] += intrinsic_reward.detach()
         next_obss[step] = next_obs

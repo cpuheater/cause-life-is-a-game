@@ -103,11 +103,11 @@ args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
 
-
+# https://github.com/openai/baselines/blob/master/baselines/common/vec_env/vec_frame_stack.py
 class ViZDoomEnv:
     def __init__(self, seed, game_config, render, reward_scale, frame_skip):
         # assign observation space
-        channel_num = 3
+        channel_num = 1
 
         self.observation_shape = (channel_num, 64, 112)
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
@@ -116,7 +116,7 @@ class ViZDoomEnv:
 
         game.load_config(f"./{game_config}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.CRCGCB)
+        game.set_screen_format(ScreenFormat.GRAY8)
         print(game.get_available_buttons())
         num_buttons = game.get_available_buttons_size()
         self.action_space = Discrete(num_buttons)
@@ -219,6 +219,49 @@ class VecPyTorch(VecEnvWrapper):
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
 
+class VecPyTorchFrameStack(VecEnvWrapper):
+    def __init__(self, venv, nstack, device=None):
+        self.venv = venv
+        self.nstack = nstack
+
+        wos = venv.observation_space  # wrapped ob space
+        self.shape_dim0 = wos.shape[0]
+
+        low = np.repeat(wos.low, self.nstack, axis=0)
+        high = np.repeat(wos.high, self.nstack, axis=0)
+
+        if device is None:
+            device = torch.device('cpu')
+        self.stacked_obs = torch.zeros((venv.num_envs, ) +
+                                       low.shape).to(device)
+
+        observation_space = gym.spaces.Box(
+            low=low, high=high, dtype=venv.observation_space.dtype)
+        VecEnvWrapper.__init__(self, venv, observation_space=observation_space)
+
+    def step_wait(self):
+        obs, rews, news, infos = self.venv.step_wait()
+        self.stacked_obs[:, :-self.shape_dim0] = \
+            self.stacked_obs[:, self.shape_dim0:].clone()
+        for (i, new) in enumerate(news):
+            if new:
+                self.stacked_obs[i] = 0
+        self.stacked_obs[:, -self.shape_dim0:] = obs
+        return self.stacked_obs, rews, news, infos
+
+    def reset(self):
+        obs = self.venv.reset()
+        if torch.backends.cudnn.deterministic:
+            self.stacked_obs = torch.zeros(self.stacked_obs.shape)
+        else:
+            self.stacked_obs.zero_()
+        self.stacked_obs[:, -self.shape_dim0:] = obs
+        return self.stacked_obs
+
+    def close(self):
+        self.venv.close()
+
+
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
@@ -246,10 +289,10 @@ def make_env(seed):
 
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
-envs = VecPyTorch(
+envs = VecPyTorchFrameStack(VecPyTorch(
     SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
     device
-)
+), 4, device)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
@@ -267,7 +310,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3):
+    def __init__(self, envs, frames=4):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),

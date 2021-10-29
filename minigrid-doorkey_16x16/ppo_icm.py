@@ -1,22 +1,9 @@
-# https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
-
-import numpy as np
-from collections import deque
-import gym
-from gym import spaces
-import cv2
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-import skimage.transform
-
-cv2.ocl.setUseOpenCL(False)
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-from gym import spaces, RewardWrapper, ObservationWrapper
 import argparse
 from distutils.util import strtobool
 import numpy as np
@@ -27,163 +14,11 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
-import vizdoomgym
-from gym import spaces, RewardWrapper, ObservationWrapper
 
-class MaxAndSkipEnv(gym.Wrapper):
-    def __init__(self, env, skip=4):
-        """Return only every `skip`-th frame"""
-        gym.Wrapper.__init__(self, env)
-        # most recent raw observations (for max pooling across time steps)
-        self._obs_buffer = np.zeros((2,)+env.observation_space.shape, dtype=np.uint8)
-        self._skip       = skip
-
-    def step(self, action):
-        """Repeat action, sum reward, and max over last observations."""
-        total_reward = 0.0
-        done = None
-        for i in range(self._skip):
-            obs, reward, done, info = self.env.step(action)
-            total_reward += reward
-            if done:
-                break
-        return obs, total_reward, done, info
-
-    def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
-
-class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=64, height=112, grayscale=True, dict_space_key=None):
-        """
-        Warp frames to 84x84 as done in the Nature paper and later work.
-        If the environment uses dictionary observations, `dict_space_key` can be specified which indicates which
-        observation should be warped.
-        """
-        super().__init__(env)
-        self._width = width
-        self._height = height
-        self._grayscale = grayscale
-        self._key = dict_space_key
-        if self._grayscale:
-            num_colors = 1
-        else:
-            num_colors = 3
-
-        new_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(self._height, self._width, num_colors),
-            dtype=np.uint8,
-        )
-        if self._key is None:
-            original_space = self.observation_space
-            self.observation_space = new_space
-        else:
-            original_space = self.observation_space.spaces[self._key]
-            self.observation_space.spaces[self._key] = new_space
-        assert original_space.dtype == np.uint8 and len(original_space.shape) == 3
-
-    def observation(self, obs):
-        if self._key is None:
-            frame = obs
-        else:
-            frame = obs[self._key]
-
-        if self._grayscale:
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        frame = cv2.resize(
-            frame, (self._width, self._height), interpolation=cv2.INTER_AREA
-        )
-        if self._grayscale:
-            frame = np.expand_dims(frame, -1)
-
-        if self._key is None:
-            obs = frame
-        else:
-            obs = obs.copy()
-            obs[self._key] = frame
-        return obs
-
-
-class FrameStack(gym.Wrapper):
-    def __init__(self, env, k):
-        """Stack k last frames.
-        Returns lazy array, which is much more memory efficient.
-        See Also
-        --------
-        baselines.common.atari_wrappers.LazyFrames
-        """
-        gym.Wrapper.__init__(self, env)
-        self.k = k
-        self.frames = deque([], maxlen=k)
-        shp = env.observation_space.shape
-        self.observation_space = spaces.Box(low=0, high=255, shape=(shp[:-1] + (shp[-1] * k,)), dtype=env.observation_space.dtype)
-
-    def reset(self):
-        ob = self.env.reset()
-        for _ in range(self.k):
-            self.frames.append(ob)
-        return self._get_ob()
-
-    def step(self, action):
-        ob, reward, done, info = self.env.step(action)
-        self.frames.append(ob)
-        return self._get_ob(), reward, done, info
-
-    def _get_ob(self):
-        assert len(self.frames) == self.k
-        return LazyFrames(list(self.frames))
-
-
-class LazyFrames(object):
-    def __init__(self, frames):
-        """This object ensures that common frames between the observations are only stored once.
-        It exists purely to optimize memory usage which can be huge for DQN's 1M frames replay
-        buffers.
-        This object should only be converted to numpy array before being passed to the model.
-        You'd not believe how complex the previous solution was."""
-        self._frames = frames
-        self._out = None
-
-    def _force(self):
-        if self._out is None:
-            self._out = np.concatenate(self._frames, axis=-1)
-            self._frames = None
-        return self._out
-
-    def __array__(self, dtype=None):
-        out = self._force()
-        if dtype is not None:
-            out = out.astype(dtype)
-        return out
-
-    def __len__(self):
-        return len(self._force())
-
-    def __getitem__(self, i):
-        return self._force()[i]
-
-    def count(self):
-        frames = self._force()
-        return frames.shape[frames.ndim - 1]
-
-    def frame(self, i):
-        return self._force()[..., i]
-
-def wrap_atari(env, max_episode_steps=None):
-    env = MaxAndSkipEnv(env, skip=4)
-
-    assert max_episode_steps is None
-
-    return env
-
-def wrap_deepmind(env, frame_stack=True):
-    """Configure environment for DeepMind-style Atari.
-    """
-    env = WarpFrame(env)
-    if frame_stack:
-        env = FrameStack(env, 4)
-    return env
+from gym.envs.classic_control import CartPoleEnv
+from gym import spaces
+import numpy as np
+from gym_minigrid.wrappers import *
 
 
 class ImageToPyTorch(gym.ObservationWrapper):
@@ -207,41 +42,13 @@ class ImageToPyTorch(gym.ObservationWrapper):
 def wrap_pytorch(env):
     return ImageToPyTorch(env)
 
-class InfoWrapper(gym.Wrapper):
-    def __init__(self, env):
-        gym.Wrapper.__init__(self, env)
-        self._rewards = []
-
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        self._rewards = []
-        return obs
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        reward *= 0.01
-        self._rewards.append(reward)
-        ## Retrieve the RGB frame of the agent's vision
-
-        ## Render the environment in realtime
-        #if self._realtime_mode:
-        #    self._env.render(tile_size=96)
-        #    time.sleep(0.5)
-
-        # Wrap up episode information once completed (i.e. done)
-        if done:
-            print(f"rewards: {sum(self._rewards)}")
-            info = {"reward": sum(self._rewards),
-                    "length": len(self._rewards)}
-
-        return obs, reward, done, info
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="VizdoomBasic-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-16x16-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -261,17 +68,13 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=0.01,
-                        help='scale reward')
-    parser.add_argument('--frame-skip', type=int, default=4,
-                        help='frame skip')
 
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=8,
+    parser.add_argument('--num-envs', type=int, default=4,
                         help='the number of parallel game environment')
-    parser.add_argument('--num-steps', type=int, default=128,
+    parser.add_argument('--num-steps', type=int, default=256,
                         help='the number of steps per game environment')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -283,7 +86,7 @@ if __name__ == "__main__":
                         help="coefficient of the value function")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--clip-coef', type=float, default=0.1,
+    parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
                         help="the K epochs to update the policy")
@@ -293,88 +96,62 @@ if __name__ == "__main__":
                         help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
     parser.add_argument('--target-kl', type=float, default=0.03,
                         help='the target-kl variable that is referred by --kl')
-    parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='Use GAE for advantage computation')
     parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help="Toggles advantages normalization")
-    parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help="Toggle learning rate annealing for policy and value networks")
-    parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+    parser.add_argument('--icm-enabled', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+                        help='enable ICM')
+    parser.add_argument('--icm-eta', type=float, default=0.5,
+                        help="icm eta")
+    parser.add_argument('--icm-beta', type=float, default=0.2,
+                        help='icm beta')
+    parser.add_argument('--icm-lambda', type=float, default=1,
+                        help='icm lambda')
+    parser.add_argument('--icm-feature-encoder-size', type=float, default=126,
+                        help='icm')
 
     args = parser.parse_args()
-    #if not args.seed:
-    args.seed = int(time.time())
+    if not args.seed:
+        args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
+class InfoWrapper(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        self._rewards = []
 
-class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
-        # assign observation space
-        channel_num = 3
-
-        self.observation_shape = (channel_num, 64, 112)
-        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
-        self.reward_scale = reward_scale
-        game = DoomGame()
-
-        game.load_config(f"./scenarios/{game_config}.cfg")
-        game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.CRCGCB)
-
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
-        self.frame_skip = frame_skip
-
-        game.set_seed(seed)
-        game.set_window_visible(render)
-        game.init()
-
-        self.game = game
-
-    def get_current_input(self):
-        state = self.game.get_state()
-        res_source = []
-        res_source.append(state.screen_buffer)
-        res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
-        self.last_input = res
-        return res
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        self._rewards = []
+        return obs["image"]
 
     def step(self, action):
-        info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
-        done = self.game.is_episode_finished()
-        if done:
-            ob = self.last_input
-        else:
-            ob = self.get_current_input()
-        # reward scaling
-        reward = reward * self.reward_scale
-        self.total_reward += reward
-        self.total_length += 1
+        obs, reward, done, info = self.env.step(action)
+        self._rewards.append(reward)
+        vis_obs = obs["image"]
 
         if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
+            print(f"rewards: {sum(self._rewards)}")
+            info = {"reward": sum(self._rewards),
+                    "length": len(self._rewards)}
 
-        return ob, reward, done, info
+        return vis_obs, reward, done, info
 
-    def reset(self):
-        self.game.new_episode()
-        self.total_reward = 0
-        self.total_length = 0
-        ob = self.get_current_input()
-        return ob
+class WarpFrame(gym.ObservationWrapper):
+    def __init__(self, env, width=84, height=84):
+        super().__init__(env)
+        self.observation_space = env.observation_space.spaces['image']
+        self.action_space = Discrete(5)
 
-    def close(self):
-        self.game.close()
+    def observation(self, obs):
+        return obs
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -412,58 +189,103 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-
 def make_env(seed):
     def thunk():
         env = gym.make(args.gym_id)
         env = InfoWrapper(env)
-        env = wrap_atari(env)
-        env = wrap_pytorch(
-            wrap_deepmind(
-                env,
-                frame_stack=True,
-            )
-        )
+        env = WarpFrame(env)
+        env = wrap_pytorch(env)
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
     return thunk
 
-
-
-
-#def make_env(seed):
-#   def thunk():
-#        env = gym.make(args.gym_id)
-#        env.seed()
-#        env = ResizeAndGrayscaleWrapper(env, 112, 64)
-#
-##        #timeout = doom_cfg.default_timeout - 10
-#        #env = TimeLimitWrapper(env, limit=timeout, random_variation_steps=5)
-
-        #env = SkipAndStackFramesWrapper(env, num_frames=4)
-
-        #env = RewardScalingWrapper(env, 1)
-        #env = RemainingTimeWrapper(env)
-        #env.seed(seed)
-        #env.action_space.seed(seed)
-        #env.observation_space.seed(seed)
-        #return env
-   #return thunk
-
-
-
-
-#envs = VecPyTorch(DummyVecEnv([make_env(args.seed+i) for i in range(args.num_envs)]), device)
-# if args.prod_mode:
 envs = VecPyTorch(
     SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
     device
 )
+# if args.prod_mode:
+#     envs = VecPyTorch(
+#         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
+#         device
+#     )
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
+class FeatureEncoder(nn.Module):
+    def __init__(self, channels):
+        super(FeatureEncoder, self).__init__()
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(channels, 16, kernel_size=(1, 1), padding=0)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(980, args.icm_feature_encoder_size)),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        x = self.network(x)
+        return x
+
+
+class InverseModel(nn.Module):
+    def __init__(self, envs):
+        super(InverseModel, self).__init__()
+        self.network = nn.Sequential(
+            layer_init(nn.Linear(args.icm_feature_encoder_size * 2, 256)),
+            nn.ReLU(),
+            layer_init(nn.Linear(256, envs.action_space.n))
+        )
+
+    def forward(self, obs, next_obs):
+        action = self.network(torch.cat([obs, next_obs], dim=1))
+        return action
+
+class ForwardModel(nn.Module):
+    def __init__(self, envs):
+        super(ForwardModel, self).__init__()
+        self.network = nn.Sequential(
+            layer_init(nn.Linear(args.icm_feature_encoder_size + envs.action_space.n, 256)),
+            nn.ReLU(),
+            layer_init(nn.Linear(256, args.icm_feature_encoder_size))
+        )
+        self.action_space = envs.action_space.n
+
+    def forward(self, obs, action):
+        action_onehot = torch.FloatTensor(
+            len(action), self.action_space).to(device)
+        action_onehot.zero_()
+        action_onehot.scatter_(1, action.view(len(action), -1), 1)
+        obs_action = torch.cat([obs, action_onehot], dim=1)
+        next_obs = self.network(obs_action)
+        return next_obs
+
+
+class ICM(nn.Module):
+    def __init__(self, envs):
+        super(ICM, self).__init__()
+        self.forward_model = ForwardModel(envs)
+        self.inverse_model = InverseModel(envs)
+        self.feature_encoder = FeatureEncoder(3)
+
+    def forward(self, obs, next_obs, action):
+        obs_features = self.feature_encoder(obs)
+        next_obs_features = self.feature_encoder(next_obs)
+        obs_next_pred = self.forward_model(obs_features.detach(), action.detach())
+        action_pred = self.inverse_model(obs_features, next_obs_features)
+        return obs_next_pred, action_pred, next_obs_features
+
+    def compute_ir(self, obs, next_obs, action):
+
+        obs_pred, action_pred, next_obs_features = self.forward(obs, next_obs, action)
+
+        intrinsic_reward = args.icm_eta * ((obs_pred - next_obs_features).pow(2)).mean(dim=1)
+        return intrinsic_reward
+
+
 class Scale(nn.Module):
     def __init__(self, scale):
         super().__init__()
@@ -478,46 +300,47 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=4):
+    def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            Scale(1/255),
-            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(980, 124)),
             nn.ReLU()
         )
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
+        self.actor = layer_init(nn.Linear(124, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(124, 1), std=1)
 
     def forward(self, x):
         return self.network(x)
 
     def get_action(self, x, action=None):
         x = self.forward(x)
-        value = self.critic(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return value, action, probs.log_prob(action), probs.entropy()
+        return action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x):
         return self.critic(self.forward(x))
 
 agent = Agent(envs).to(device)
-optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+icm = ICM(envs).to(device)
+
+inverse_loss = nn.CrossEntropyLoss()
+forward_loss = nn.MSELoss()
+optimizer = optim.Adam(list(agent.parameters()) + list(icm.parameters()), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+next_obss = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
 actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -546,23 +369,23 @@ for update in range(1, num_updates+1):
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, action, logproba, _ = agent.get_action(obs[step])
+            values[step] = agent.get_value(obs[step]).flatten()
+            action, logproba, _ = agent.get_action(obs[step])
 
-        values[step] = value.flatten()
         actions[step] = action
         logprobs[step] = logproba
-
         # TRY NOT TO MODIFY: execute the game and log data.
+        action[action == 4] = 5
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-
-        #for info in infos:
-        #    if 'episode' in info.keys():
-        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
-        #        break
+        #rewards[step] = 0
+        with torch.no_grad():
+            intrinsic_reward = icm.compute_ir(obs[step], next_obs, actions[step].long().unsqueeze(1))
+        rewards[step] += 0.1 * intrinsic_reward
+        next_obss[step] = next_obs
         for info in infos:
             if info and 'reward' in info.keys():
+                writer.add_scalar("charts/intrinsic_reward", torch.mean(intrinsic_reward), global_step)
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
             if info and 'length' in info.keys():
                 writer.add_scalar("charts/episode_length", info['length'], global_step)
@@ -602,6 +425,7 @@ for update in range(1, num_updates+1):
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
+    b_next_obss = next_obss.reshape((-1,)+envs.observation_space.shape)
 
     # Optimizaing the policy and value network
     target_agent = Agent(envs).to(device)
@@ -616,7 +440,7 @@ for update in range(1, num_updates+1):
             if args.norm_adv:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-            _, _, newlogproba, entropy = agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
+            _, newlogproba, entropy = agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
             # Stats
@@ -638,8 +462,14 @@ for update in range(1, num_updates+1):
                 v_loss = 0.5 * v_loss_max.mean()
             else:
                 v_loss = 0.5 * ((new_values - b_returns[minibatch_ind]) ** 2).mean()
+            # icm loss
+            obs_next_pred, action_pred, next_obs_features = icm.forward(b_obs[minibatch_ind], b_next_obss[minibatch_ind], b_actions.long()[minibatch_ind])
 
-            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+            f_loss = forward_loss(obs_next_pred, next_obs_features)
+            i_loss = inverse_loss(action_pred, b_actions.long()[minibatch_ind])
+            icm_loss = (1-args.icm_beta)*i_loss + args.icm_beta*f_loss
+
+            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + args.icm_lambda*icm_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -655,6 +485,9 @@ for update in range(1, num_updates+1):
                 break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/inverse_loss", i_loss, global_step)
+    writer.add_scalar("charts/forward_loss", f_loss, global_step)
+    writer.add_scalar("charts/icm_loss", icm_loss, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
     writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
