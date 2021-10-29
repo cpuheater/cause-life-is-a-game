@@ -103,10 +103,9 @@ args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
 
-# https://github.com/openai/baselines/blob/master/baselines/common/vec_env/vec_frame_stack.py
+
 class ViZDoomEnv:
     def __init__(self, seed, game_config, render, reward_scale, frame_skip):
-        # assign observation space
         channel_num = 1
 
         self.observation_shape = (channel_num, 64, 112)
@@ -120,10 +119,6 @@ class ViZDoomEnv:
         print(game.get_available_buttons())
         num_buttons = game.get_available_buttons_size()
         self.action_space = Discrete(num_buttons)
-        #[Button.MOVE_LEFT, Button.MOVE_RIGHT, Button.ATTACK, Button.MOVE_FORWARD, Button.TURN_LEFT, Button.TURN_RIGHT]
-        #actions = [([False] * num_buttons) for i in range(num_buttons)]
-        #for i in range(num_buttons):
-        #    actions[i][i] = True
 
         actions = [
             [True, False, True, False, False, False],
@@ -177,14 +172,13 @@ class ViZDoomEnv:
             ob = self.last_input
         else:
             ob = self.get_current_input()
-        # reward scaling
         reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 
         if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
+            info['reward'] = self.total_reward
+            info['length'] = self.total_length
 
         return ob, reward, done, info
 
@@ -219,6 +213,7 @@ class VecPyTorch(VecEnvWrapper):
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
 
+# https://github.com/openai/baselines/blob/master/baselines/common/vec_env/vec_frame_stack.py
 class VecPyTorchFrameStack(VecEnvWrapper):
     def __init__(self, venv, nstack, device=None):
         self.venv = venv
@@ -390,18 +385,12 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
-        #for info in infos:
-        #    if 'episode' in info.keys():
-        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
-        #        break
         for info in infos:
-            if 'Episode_Total_Reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
-            if 'Episode_Total_Len' in info.keys():
-                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
+            if 'reward' in info.keys():
+                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
+            if 'length' in info.keys():
+                writer.add_scalar("charts/episode_length", info['length'], global_step)
 
-    # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
         last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
         if args.gae:
