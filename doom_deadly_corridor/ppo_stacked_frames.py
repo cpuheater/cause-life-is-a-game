@@ -16,7 +16,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
+import matplotlib.pyplot as plt
 import argparse
 from distutils.util import strtobool
 import numpy as np
@@ -115,7 +115,7 @@ class ViZDoomEnv:
 
         game.load_config(f"./{game_config}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.GRAY8)
+        game.set_screen_format(ScreenFormat.CRCGCB)
         print(game.get_available_buttons())
         num_buttons = game.get_available_buttons_size()
         self.action_space = Discrete(num_buttons)
@@ -138,13 +138,20 @@ class ViZDoomEnv:
         self.game = game
         self.last_total_kills = None
         self.last_total_health = None
+        self.metadata = None
 
     def get_current_input(self):
         state = self.game.get_state()
         res_source = []
         res_source.append(state.screen_buffer)
         res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
+        #res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
+        res = np.transpose(res, axes=(1, 2, 0))
+        res = cv2.resize(
+            res, (112, 64), interpolation=cv2.INTER_AREA
+        )
+        res = cv2.cvtColor(res, cv2.COLOR_RGB2GRAY)
+        res = np.expand_dims(res, axis=0)
         self.last_input = res
         return res
 
@@ -282,12 +289,11 @@ def make_env(seed):
         return env
     return thunk
 
-#envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
+#envs = VecPyTorchFrameStack(
+#    VecPyTorch(DummyVecEnv([make_env(args.seed+i) for i in range(args.num_envs)]), device), 4, device)
 # if args.prod_mode:
 envs = VecPyTorchFrameStack(VecPyTorch(
-    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-    device
-), 4, device)
+    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),device), 4, device)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
