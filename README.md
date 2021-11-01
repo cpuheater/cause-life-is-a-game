@@ -1,7 +1,6 @@
 ### Solving video games with Deep Reinforcement Learning!
-Each directory contains files related to a specific game. 
-Each file is a self-contained rl algorithm with possible extension. You can determine the name 
-of the algorithm and the type of extension from the name of the file.      
+Each directory represents a particular game, within a directory you can find files and each of these files is a self-contained rl algorithm that is tuned to solve this particular game. 
+An algorithm might have one or many extensions. You can determine the name of the algorithm and the type of the extension from the name of the file.      
   
 ### List of algorithms:
 * ppo  - Proximal Policy Optimization Algorithms (https://arxiv.org/abs/1707.06347)    
