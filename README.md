@@ -7,7 +7,8 @@ An algorithm might have one or many extensions. You can determine the name of th
 * ppo_lstm - ppo with recurrent policy using LSTM
 * ppo_gru - ppo with recurrent policy using GRU 
 * sac_dis - Soft Actor-Critic for Discrete Action Settings (https://arxiv.org/abs/1910.07207)
-
+* a2c - 
+* dqn 
 
 ### List of extensions:
 * frame_stacking - stacking four consecutive frames

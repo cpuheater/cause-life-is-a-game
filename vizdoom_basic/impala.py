@@ -10,6 +10,28 @@ import skimage.transform
 
 cv2.ocl.setUseOpenCL(False)
 
+
+class ImageToPyTorch(gym.ObservationWrapper):
+    """
+    Image shape to channels x weight x height
+    """
+
+    def __init__(self, env):
+        super(ImageToPyTorch, self).__init__(env)
+        old_shape = self.observation_space.shape
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(old_shape[-1], old_shape[0], old_shape[1]),
+            dtype=np.uint8,
+        )
+
+    def observation(self, observation):
+        return np.transpose(observation, axes=(2, 0, 1))
+
+def wrap_pytorch(env):
+    return ImageToPyTorch(env)
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -26,8 +48,6 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
-from sil_module import sil_module
-import copy
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='A2C agent')
@@ -36,7 +56,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="basic",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=7e-4,
+    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -58,6 +78,8 @@ if __name__ == "__main__":
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
+    parser.add_argument('--rnn-hidden-size', type=int, default=256,
+                        help='rnn hidden size')
 
     # Algorithm specific arguments
     parser.add_argument('--num-envs', type=int, default=8,
@@ -72,25 +94,14 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.5,
+    parser.add_argument('--max-grad-norm', type=float, default=0.0,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=False,
                          help='Use GAE for advantage computation')
     parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help="Toggle learning rate annealing for policy and value networks")
-
-    #SIL
-    parser.add_argument('--num-update', type=int, default=4,help='')
-    parser.add_argument('--capacity', type=int, default=100000, help='')
-    parser.add_argument('--sil-beta', type=float, default=0.1, help='')
-    parser.add_argument('--sil-alpha', type=float, default=0.6, help='')
-    parser.add_argument('--max-nlogp', type=int, default=5, help='')
-    parser.add_argument('--mini-batch-size', type=int, default=64, help='')
-    parser.add_argument('--clip', type=int, default=1, help='')
-    parser.add_argument('--w_value', type=float, default=0.01, help='')
-
 
     args = parser.parse_args()
     #if not args.seed:
@@ -150,8 +161,8 @@ class ViZDoomEnv:
         self.total_length += 1
 
         if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
+            info['reward'] = self.total_reward
+            info['length'] = self.total_length
 
         return ob, reward, done, info
 
@@ -232,7 +243,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3):
+    def __init__(self, envs, frames=3, rnn_input_size=512, rnn_hidden_size=512):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),
@@ -243,33 +254,55 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(2560, rnn_hidden_size)),
             nn.ReLU()
         )
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
 
-    def forward(self, x):
-        return self.network(x)
+        self.gru = nn.GRUCell(rnn_input_size, rnn_hidden_size)
+        nn.init.orthogonal_(self.gru.weight_ih.data)
+        nn.init.orthogonal_(self.gru.weight_hh.data)
+        self.gru.bias_ih.data.fill_(0)
+        self.gru.bias_hh.data.fill_(0)
 
-    def get_action(self, x, action=None):
-        x = self.forward(x)
+        self.actor = layer_init(nn.Linear(rnn_hidden_size, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
+
+    def forward(self, x, rnn_hidden_state, mask):
+        x = self.network(x)
+        if x.size(0) == rnn_hidden_state.size(0):
+            x = rnn_hidden_state = self.gru(x, rnn_hidden_state * mask)
+        else:
+            N = rnn_hidden_state.size(0)
+            T = int(x.size(0) / N)
+            x = x.view(T, N, x.size(1))
+            mask = mask.view(T, N, 1)
+            outputs = []
+            for i in range(T):
+                rnn_hidden_state = self.gru(x[i], rnn_hidden_state * mask[i])
+                outputs.append(rnn_hidden_state)
+            x = torch.stack(outputs, dim=0)
+            x = x.view(T * N, -1)
+        return x, rnn_hidden_state
+
+    def get_action(self, x, rnn_hidden_state, mask, action=None):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
         value = self.critic(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return value, action, probs.log_prob(action), probs.entropy()
+        return value, rnn_hidden_state, action, probs.log_prob(action), probs.entropy()
 
-    def get_value(self, x):
-        return self.critic(self.forward(x))
+    def get_value(self, x, rnn_hidden_state, mask):
+        x, rnn_hidden_state = self.forward(x, rnn_hidden_state, mask)
+        return self.critic(x)
 
-agent = Agent(envs).to(device)
-optimizer = optim.RMSprop(agent.parameters(), lr=args.learning_rate)
-sil = sil_module(agent, args, optimizer)
+agent = Agent(envs, rnn_input_size=args.rnn_hidden_size, rnn_hidden_size=args.rnn_hidden_size).to(device)
+optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
+
 
 # ALGO Logic: Storage for epoch data
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
@@ -277,13 +310,17 @@ actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, args.rnn_hidden_size)).to(device)
+masks = torch.ones((args.num_steps, args.num_envs, 1)).to(device)
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
 next_obs = envs.reset()
+rnn_hidden_state = torch.zeros((args.num_envs, args.rnn_hidden_size))
 next_done = torch.zeros(args.num_envs).to(device)
+mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done])
 num_updates = args.total_timesteps // args.batch_size
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
@@ -297,10 +334,11 @@ for update in range(1, num_updates+1):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
-
+        rnn_hidden_states[step] = rnn_hidden_state
+        masks[step] = mask
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, action, _, _ = agent.get_action(obs[step])
+            value, rnn_hidden_state, action, logproba, _ = agent.get_action(obs[step], rnn_hidden_states[step], masks[step])
 
         values[step] = value.flatten()
         actions[step] = action
@@ -308,17 +346,17 @@ for update in range(1, num_updates+1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-        sil.step(obs[step].cpu().numpy(), action.cpu().numpy(), copy.deepcopy(rs.cpu().reshape(-1).numpy()), ds)
+        mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
 
         for info in infos:
             if 'Episode_Total_Reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
+                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
             if 'Episode_Total_Len' in info.keys():
-                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
+                writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), rnn_hidden_state, mask).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -347,8 +385,12 @@ for update in range(1, num_updates+1):
     b_obs = obs.reshape((-1,)+envs.observation_space.shape)
     b_actions = actions.reshape((-1,)+envs.action_space.shape)
     b_returns = returns.reshape(-1)
+    b_rnn_hidden_states = rnn_hidden_states[0].reshape((-1, args.rnn_hidden_size))
+    b_masks = masks.reshape((-1, 1))
 
-    b_values, b_actions, b_logprobs, b_entropy = agent.get_action(b_obs, b_actions.long())
+    b_values, b_rnn_hidden_state, b_actions, b_logprobs, b_entropy = agent.get_action(b_obs,
+                                                                                      b_rnn_hidden_states,
+                                                                                      masks, b_actions.long())
     advantages = b_returns - b_values.reshape(-1)
     v_loss = advantages.pow(2).mean()
     pg_loss = -(advantages.detach() * b_logprobs).mean()
@@ -357,11 +399,7 @@ for update in range(1, num_updates+1):
 
     optimizer.zero_grad()
     loss.backward()
-    nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
     optimizer.step()
-
-    sil.train_sil_model()
-
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)

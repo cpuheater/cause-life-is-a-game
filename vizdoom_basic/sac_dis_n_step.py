@@ -14,7 +14,6 @@ import collections
 import numpy as np
 import gym
 from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
@@ -76,8 +75,8 @@ class ViZDoomEnv:
         self.total_length += 1
 
         if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
+            info['reward'] = self.total_reward
+            info['length'] = self.total_length
 
         return ob, reward, done, info
 
@@ -90,6 +89,12 @@ class ViZDoomEnv:
 
     def close(self):
         self.game.close()
+
+import random
+import torch
+import numpy as np
+from collections import namedtuple, deque
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='SAC with 2 Q functions, Online updates')
@@ -127,7 +132,7 @@ if __name__ == "__main__":
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
     parser.add_argument('--target-network-frequency', type=int, default=2, # Denis Yarats' implementation delays this by 2.
-                        help="the timesteps it takes to update the target network")
+                        help="the timeub it takes to update the target network")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--batch-size', type=int, default=64, # Worked better in my experiments, still have to do ablation on this. Please remind me
@@ -136,8 +141,10 @@ if __name__ == "__main__":
                         help="target smoothing coefficient (default: 0.005)")
     parser.add_argument('--alpha', type=float, default=0.2,
                         help="Entropy regularization coefficient.")
-    parser.add_argument('--learning-starts', type=int, default=5e1,
+    parser.add_argument('--learning-starts', type=int, default=1e1,
                         help="timestep to start learning")
+    parser.add_argument('--n-step', type=int, default=3,
+                        help="n step")
 
 
     # Additional hyper parameters for tweaks
@@ -155,8 +162,8 @@ if __name__ == "__main__":
                         help='weight initialization scheme for the neural networks.')
 
     args = parser.parse_args()
-    #if not args.seed:
-    args.seed = int(time.time())
+    if not args.seed:
+        args.seed = int(time.time())
 
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -272,31 +279,47 @@ class SoftQNetwork(nn.Module):
         x = self.network(x)
         return self.q_value(x)
 
+class ReplayBufferNStep(object):
+    def __init__(self, size, n_step, gamma):
+        self._storage = deque(maxlen=size)
+        self._maxsize = size
+        self.n_step_buffer = deque(maxlen=n_step)
+        self.gamma = gamma
+        self.n_step = n_step
 
-class ReplayBuffer():
-    def __init__(self, buffer_limit):
-        self.buffer = collections.deque(maxlen=buffer_limit)
+    def __len__(self):
+        return len(self._storage)
 
-    def put(self, transition):
-        self.buffer.append(transition)
+    def get_n_step(self):
+        _, _, reward, next_observation, done = self.n_step_buffer[-1]
+        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
+            reward = self.gamma * reward * (1 - do) + r
+            mext_observation, done = (next_obs, do) if do else (next_observation, done)
+        return reward, next_observation, done
 
-    def sample(self, n):
-        mini_batch = random.sample(self.buffer, n)
-        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
+    def append(self, obs, action, reward, next_obs, done):
+        self.n_step_buffer.append((obs, action, reward, next_obs, done))
+        if len(self.n_step_buffer) < self.n_step:
+            return
+        reward, next_obs, done = self.get_n_step()
+        obs, action, _, _, _ = self.n_step_buffer[0]
+        self._storage.append([obs, action, reward, next_obs, done])
 
-        for transition in mini_batch:
-            s, a, r, s_prime, done_mask = transition
-            s_lst.append(s)
-            a_lst.append(a)
-            r_lst.append(r)
-            s_prime_lst.append(s_prime)
-            done_mask_lst.append(done_mask)
+    def sample(self, batch_size):
+        idxes = np.random.choice(len(self._storage), batch_size, replace=True)
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, reward, obs_tp1, done = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1, copy=False))
+            dones.append(done)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
-        return np.array(s_lst), np.array(a_lst), \
-               np.array(r_lst), np.array(s_prime_lst), \
-               np.array(done_mask_lst)
+rb=ReplayBufferNStep(args.buffer_size, 4, args.gamma)
 
-rb = ReplayBuffer(args.buffer_size)
 pg = Policy(env.action_space.n).to(device)
 qf1 = SoftQNetwork(env.action_space.n).to(device)
 qf2 = SoftQNetwork(env.action_space.n).to(device)
@@ -323,7 +346,6 @@ else:
 global_episode = 0
 obs, done = env.reset(), False
 episode_reward, episode_length= 0.,0
-max_episode_reward = -np.inf
 
 for global_step in range(1, args.total_timesteps+1):
     # ALGO LOGIC: put action logic here
@@ -333,25 +355,21 @@ for global_step in range(1, args.total_timesteps+1):
         action, _ = pg.get_action([obs], device)
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, _ = env.step(action)
-    #if not done:
-    #    if reward < 0:
-    #        reward = -1
-
     reward = 100 if reward > 0 else reward
-    rb.put((obs, action, reward, next_obs, done))
+    rb.append(obs, action, reward, next_obs, done)
     episode_reward += reward
     episode_length += 1
     obs = np.array(next_obs)
 
     # ALGO LOGIC: training.
-    if len(rb.buffer) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
+    if len(rb) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
             probs, next_state_log_probs = pg.forward(s_next_obses, device)
             qf1_next_target = qf1_target.forward(s_next_obses, device)
             qf2_next_target = qf2_target.forward(s_next_obses, device)
             min_qf_next_target = (probs * (torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_probs)).sum(-1)
-            next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * args.gamma * min_qf_next_target
+            next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * min_qf_next_target
 
         qf1_a_values = qf1.forward(s_obs,  device)[np.arange(args.batch_size), np.array(s_actions)]
         qf2_a_values = qf2.forward(s_obs,  device)[np.arange(args.batch_size), np.array(s_actions)]
@@ -396,7 +414,7 @@ for global_step in range(1, args.total_timesteps+1):
             #for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
             #    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
-    if len(rb.buffer) > args.batch_size and global_step % 100 == 0:
+    if len(rb) > args.batch_size and global_step % 100 == 0:
         writer.add_scalar("losses/soft_q_value_1_loss", qf1_loss.item(), global_step)
         writer.add_scalar("losses/soft_q_value_2_loss", qf2_loss.item(), global_step)
         writer.add_scalar("losses/qf_loss", qf_loss.item(), global_step)
@@ -406,12 +424,11 @@ for global_step in range(1, args.total_timesteps+1):
             writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
     if done:
-        print(f"Episode reward {episode_reward}")
         global_episode += 1 # Outside the loop already means the epsiode is done
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/episode_length", episode_length, global_step)
         # Terminal verbosity
-        if global_episode % 10 == 0:
+        if global_episode % 1 == 0:
             print(f"Episode: {global_episode} Step: {global_step}, Ep. Reward: {episode_reward}")
 
         # Reseting what need to be

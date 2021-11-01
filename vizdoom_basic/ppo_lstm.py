@@ -61,7 +61,7 @@ if __name__ == "__main__":
     parser.add_argument('--rnn-hidden-size', type=int, default=256,
                         help='rnn hidden size')
     parser.add_argument('--seq-length', type=int, default=8,
-                        help='seq length')
+                        help='rnn seq length')
 
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=8,
@@ -158,8 +158,8 @@ class ViZDoomEnv:
         self.total_length += 1
 
         if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
+            info['reward'] = self.total_reward
+            info['length'] = self.total_length
 
         return ob, reward, done, info
 
@@ -460,9 +460,9 @@ for update in range(1, num_updates+1):
         rnn_cell_state = rnn_cell_state * mask
         for info in infos:
             if 'Episode_Total_Reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
+                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
             if 'Episode_Total_Len' in info.keys():
-                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
+                writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
