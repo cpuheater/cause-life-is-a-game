@@ -15,7 +15,7 @@ An algorithm might have one or many extensions. You can determine the name of th
 * n_step - using n step returns
 * relational - Relational Deep Reinforcement Learning (https://arxiv.org/abs/1806.01830)
 * sil - Self imitation learning (https://arxiv.org/abs/1806.05635)  
-
+* icm - 
 
 
 The core algorithms are based on [cleanrl](https://github.com/vwxyzjn/cleanrl) and comes with many 

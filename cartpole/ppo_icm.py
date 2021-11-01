@@ -19,31 +19,6 @@ from gym.envs.classic_control import CartPoleEnv
 from gym import spaces
 import numpy as np
 
-
-class CartPoleNoVelEnv(CartPoleEnv):
-    """Variant of CartPoleEnv with velocity information removed. This task requires memory to solve."""
-
-    def __init__(self):
-        super(CartPoleNoVelEnv, self).__init__()
-        high = np.array([
-            self.x_threshold * 2,
-            self.theta_threshold_radians * 2,
-            ])
-        self.observation_space = spaces.Box(-high, high, dtype=np.float32)
-
-    @staticmethod
-    def _pos_obs(full_obs):
-        xpos, _xvel, thetapos, _thetavel = full_obs
-        return xpos, thetapos
-
-    def reset(self):
-        full_obs = super().reset()
-        return CartPoleNoVelEnv._pos_obs(full_obs)
-
-    def step(self, action):
-        full_obs, rew, done, info = super().step(action)
-        return CartPoleNoVelEnv._pos_obs(full_obs), rew, done, info
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
@@ -319,9 +294,8 @@ for update in range(1, num_updates+1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
-        rewards[step] = 0
+        rewards[step] = 0 # using only intrinsic curiosity
         intrinsic_reward = icm.compute_ir(obs[step], next_obs, action.unsqueeze(1))
-        print(intrinsic_reward)
         rewards[step] += intrinsic_reward.detach()
         next_obss[step] = next_obs
         for info in infos:

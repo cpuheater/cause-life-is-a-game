@@ -19,31 +19,6 @@ from gym.envs.classic_control import CartPoleEnv
 from gym import spaces
 import numpy as np
 
-
-class CartPoleNoVelEnv(CartPoleEnv):
-    """Variant of CartPoleEnv with velocity information removed. This task requires memory to solve."""
-
-    def __init__(self):
-        super(CartPoleNoVelEnv, self).__init__()
-        high = np.array([
-            self.x_threshold * 2,
-            self.theta_threshold_radians * 2,
-        ])
-        self.observation_space = spaces.Box(-high, high, dtype=np.float32)
-
-    @staticmethod
-    def _pos_obs(full_obs):
-        xpos, _xvel, thetapos, _thetavel = full_obs
-        return xpos, thetapos
-
-    def reset(self):
-        full_obs = super().reset()
-        return CartPoleNoVelEnv._pos_obs(full_obs)
-
-    def step(self, action):
-        full_obs, rew, done, info = super().step(action)
-        return CartPoleNoVelEnv._pos_obs(full_obs), rew, done, info
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
@@ -152,7 +127,7 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(gym_id, seed, idx):
     def thunk():
 
-        env = gym.make(gym_id) #CartPoleNoVelEnv()
+        env = gym.make(gym_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if args.capture_video:
             if idx == 0:
@@ -162,12 +137,11 @@ def make_env(gym_id, seed, idx):
         env.observation_space.seed(seed)
         return env
     return thunk
-envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
-# if args.prod_mode:
-#     envs = VecPyTorch(
-#         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
-#         device
-#     )
+#envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
+#if args.prod_mode:
+envs = VecPyTorch(
+         SubprocVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)], "fork"),
+         device)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
