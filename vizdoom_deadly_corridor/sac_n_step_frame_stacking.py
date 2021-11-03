@@ -24,43 +24,111 @@ import cv2
 from gym_minigrid.wrappers import *
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, GameVariable, Button, AutomapMode, Mode, doom_fixed_to_double
+import matplotlib.pyplot as plt
+
+
+class LazyFrames(object):
+    def __init__(self, frames):
+        """This object ensures that common frames between the observations are only stored once.
+        It exists purely to optimize memory usage which can be huge for DQN's 1M frames replay
+        buffers.
+        This object should only be converted to numpy array before being passed to the model.
+        You'd not believe how complex the previous solution was."""
+        self._frames = frames
+        self._out = None
+
+    def _force(self):
+        if self._out is None:
+            self._out = np.concatenate(self._frames, axis=0)
+            self._frames = None
+        return self._out
+
+    def __array__(self, dtype=None):
+        out = self._force()
+        if dtype is not None:
+            out = out.astype(dtype)
+        return out
+
+    def __len__(self):
+        return len(self._force())
+
+    def __getitem__(self, i):
+        return self._force()[i]
+
+    def count(self):
+        frames = self._force()
+        return frames.shape[frames.ndim - 1]
+
+    def frame(self, i):
+        return self._force()[..., i]
 
 class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
+    def __init__(self, seed, game_config, render, reward_scale, frame_skip, frame_stack=4):
         # assign observation space
-        channel_num = 3
-
+        channel_num = 1
         self.observation_shape = (channel_num, 64, 112)
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
         self.reward_scale = reward_scale
         game = DoomGame()
 
-        game.load_config(f"./{game_config}.cfg")
+        game.load_config(f"./scenarios/{game_config}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
-
         num_buttons = game.get_available_buttons_size()
         self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
+
+        actions = [
+            [True, False, True, False, False, False],
+            [False, True, True, False, False, False],
+            [False, False, True, False, False, False],
+            [False, False, True, True, False, False],
+            [False, False, True, False, True, False],
+            [False, False, True, False, False, True]
+        ]
+
         self.actions = actions
         self.frame_skip = frame_skip
-
         game.set_seed(seed)
         game.set_window_visible(render)
         game.init()
 
         self.game = game
+        self.last_total_kills = None
+        self.last_total_health = None
+        self.frame_stack = frame_stack
+        self.frames = deque([], maxlen=self.frame_stack)
 
     def get_current_input(self):
         state = self.game.get_state()
         res_source = []
         res_source.append(state.screen_buffer)
         res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
+
+        res = np.transpose(res, axes=(1, 2, 0))
+        res = cv2.resize(
+            res, (self.observation_space.shape[2], self.observation_space.shape[1]), interpolation=cv2.INTER_AREA
+        )
+        res = cv2.cvtColor(res, cv2.COLOR_RGB2GRAY)
+        res = np.expand_dims(res, axis=0)
         self.last_input = res
         return res
+
+    def get_health_reward(self):
+        if self.last_total_health == None:
+            health = 0
+        else:
+            health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
+        self.last_total_health = self.game.get_game_variable(GameVariable.HEALTH)
+        return health  if health < 0 else 0
+
+    def get_kill_reward(self):
+        if self.last_total_kills == None:
+            kill = 0
+        else:
+            kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
+        self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
+        return kill * 5 if kill > 0 else 0
 
     def step(self, action):
         info = {}
@@ -71,22 +139,25 @@ class ViZDoomEnv:
         else:
             ob = self.get_current_input()
         # reward scaling
-        reward = reward * self.reward_scale
+        reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
         self.total_reward += reward
         self.total_length += 1
 
         if done:
             info['Episode_Total_Reward'] = self.total_reward
             info['Episode_Total_Len'] = self.total_length
-
-        return ob, reward, done, info
+        self.frames.append(ob)
+        return LazyFrames(list(self.frames)), reward, done, info
 
     def reset(self):
         self.game.new_episode()
         self.total_reward = 0
         self.total_length = 0
-        ob = self.get_current_input()
-        return ob
+        for _ in range(self.frame_stack):
+            ob = self.get_current_input()
+            self.frames.append(ob)
+
+        return LazyFrames(list(self.frames))
 
     def close(self):
         self.game.close()
@@ -134,10 +205,7 @@ class ReplayBufferNStep:
         Return = 0
         for idx in range(self.n_step):
             Return += self.gamma**idx * n_step_buffer[idx][2]
-
         return n_step_buffer[0][0], n_step_buffer[0][1], Return, n_step_buffer[-1][3], n_step_buffer[-1][4]
-
-
 
     def sample(self):
         """Randomly sample a batch of experiences from memory."""
@@ -161,7 +229,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="health_gathering",
+    parser.add_argument('--gym-id', type=str, default="deadly_corridor",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
@@ -169,7 +237,7 @@ if __name__ == "__main__":
                         help='seed of the experiment')
     parser.add_argument('--episode-length', type=int, default=0,
                         help='the maximum length of each episode')
-    parser.add_argument('--total-timesteps', type=int, default=8000000,
+    parser.add_argument('--total-timesteps', type=int, default=4000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -203,7 +271,7 @@ if __name__ == "__main__":
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=1e1,
                         help="timestep to start learning")
-    parser.add_argument('--n-step', type=int, default=10,
+    parser.add_argument('--n-step', type=int, default=6,
                         help="n step")
 
 
@@ -238,7 +306,7 @@ if args.prod_mode:
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
-env = ViZDoomEnv(args.seed, args.gym_id, render=True, reward_scale=0.01, frame_skip=4)
+env = ViZDoomEnv(seed = args.seed, game_config = args.gym_id, render=True, reward_scale=0.01, frame_skip=4)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -267,7 +335,7 @@ class Policy(nn.Module):
         self.num_actions = num_actions
 
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(3, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
@@ -312,7 +380,7 @@ class SoftQNetwork(nn.Module):
         self.n_actions = num_actions
 
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(3, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
@@ -339,34 +407,7 @@ class SoftQNetwork(nn.Module):
         x = self.network(x)
         return self.q_value(x)
 
-
-"""class ReplayBuffer():
- def __init__(self, buffer_limit):
-     self.buffer = collections.deque(maxlen=buffer_limit)
-
- def append(self, obs, action, reward, next_obs, done):
-     self.buffer.append((obs, action, reward, next_obs, done))
-
- def __len__(self):
-     return len(self.buffer)
-
- def sample(self, n):
-     mini_batch = random.sample(self.buffer, n)
-     s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
-
-     for transition in mini_batch:
-         s, a, r, s_prime, done_mask = transition
-         s_lst.append(s)
-         a_lst.append(a)
-         r_lst.append(r)
-         s_prime_lst.append(s_prime)
-         done_mask_lst.append(done_mask)
-
-     return np.array(s_lst), np.array(a_lst), \
-            np.array(r_lst), np.array(s_prime_lst), \
-            np.array(done_mask_lst)"""
-
-class ReplayBufferNStep2(object):
+class ReplayBufferNStep(object):
     def __init__(self, size, n_step, gamma):
         self._storage = deque(maxlen=size)
         self._maxsize = size
@@ -405,13 +446,8 @@ class ReplayBufferNStep2(object):
             dones.append(done)
         return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
-rb=ReplayBufferNStep2(args.buffer_size, 4, args.gamma)
+rb=ReplayBufferNStep(args.buffer_size, 4, args.gamma)
 
-#rb = ReplayBuffer(args.buffer_size,
-#                  args.batch_size,
-#                  args.seed,
-#                  args.gamma,
-#                  n_step=args.n_step)
 
 pg = Policy(env.action_space.n).to(device)
 qf1 = SoftQNetwork(env.action_space.n).to(device)
@@ -432,7 +468,6 @@ if args.autotune:
     log_alpha = torch.zeros(1, requires_grad=True, device=device)
     alpha = log_alpha.exp().item()
     a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
-
 else:
     alpha = args.alpha
 
@@ -450,8 +485,8 @@ for global_step in range(1, args.total_timesteps+1):
         action, _ = pg.get_action([obs], device)
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, _ = env.step(action)
-    print(reward)
-    reward = -10 if reward < 0 else reward
+    #if done and reward < 0:
+    #    reward = -10
     rb.append(obs, action, reward, next_obs, done)
     episode_reward += reward
     episode_length += 1

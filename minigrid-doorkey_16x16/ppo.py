@@ -236,11 +236,13 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(980, 124)),
+            layer_init(nn.Linear(980, 256)),
+            nn.ReLU(),
+            layer_init(nn.Linear(256, 256)),
             nn.ReLU()
         )
-        self.actor = layer_init(nn.Linear(124, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(124, 1), std=1)
+        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(256, 1), std=1)
 
     def forward(self, x):
         return self.network(x)

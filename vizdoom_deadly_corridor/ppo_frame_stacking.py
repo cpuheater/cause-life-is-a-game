@@ -113,7 +113,7 @@ class ViZDoomEnv:
         self.reward_scale = reward_scale
         game = DoomGame()
 
-        game.load_config(f"./{game_config}.cfg")
+        game.load_config(f"./scenarios/{game_config}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
         print(game.get_available_buttons())
@@ -325,8 +325,6 @@ class Agent(nn.Module):
             layer_init(nn.Linear(2560, 512)),
             nn.ReLU()
         )
-        #conv_input = torch.Tensor(torch.randn((1, 3, 64, 112)))
-        #print(conv_input.size(), self.network(conv_input).size())
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
