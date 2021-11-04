@@ -177,7 +177,7 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 envs = MicroRTSGridModeVecEnv(
     num_selfplay_envs=args.num_selfplay_envs,
     num_bot_envs=args.num_bot_envs,
-    max_steps=1200,
+    max_steps=2000,
     render_theme=2,
     ai2s=[microrts_ai.coacAI for _ in range(args.num_bot_envs)],
     map_path="maps/8x8/basesWorkers8x8.xml",
@@ -474,6 +474,7 @@ for update in range(starting_update, num_updates + 1):
 
             optimizer.zero_grad()
             loss.backward()
+            grad_norm = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.parameters()) ** 0.5
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
@@ -485,6 +486,7 @@ for update in range(starting_update, num_updates + 1):
         wandb.save(f"agent.pt")
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/grad_norm", grad_norm, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("charts/update", update, global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)

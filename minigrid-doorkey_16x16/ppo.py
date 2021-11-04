@@ -119,8 +119,8 @@ if __name__ == "__main__":
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
-    #if not args.seed:
-    args.seed = int(time.time())
+    if not args.seed:
+        args.seed = int(time.time())
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
@@ -236,13 +236,11 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(980, 256)),
-            nn.ReLU(),
-            layer_init(nn.Linear(256, 256)),
+            layer_init(nn.Linear(980, 124)),
             nn.ReLU()
         )
-        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+        self.actor = layer_init(nn.Linear(124, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(124, 1), std=1)
 
     def forward(self, x):
         return self.network(x)
@@ -390,6 +388,7 @@ for update in range(1, num_updates+1):
 
             optimizer.zero_grad()
             loss.backward()
+            grad_norm = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.parameters()) ** 0.5
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
@@ -402,6 +401,7 @@ for update in range(1, num_updates+1):
                 break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/grad_norm", grad_norm, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
     writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
