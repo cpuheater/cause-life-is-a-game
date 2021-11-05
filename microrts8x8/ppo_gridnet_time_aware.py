@@ -186,7 +186,7 @@ envs = MicroRTSGridModeVecEnv(
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
 if args.capture_video:
-        envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
+    envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x: x % 10000000 == 0, video_length=2000)
 # if args.prod_mode:
 #     envs = VecPyTorch(
