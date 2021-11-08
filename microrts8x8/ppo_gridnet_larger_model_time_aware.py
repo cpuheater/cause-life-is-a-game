@@ -91,7 +91,7 @@ if __name__ == "__main__":
 args.num_envs = args.num_selfplay_envs + args.num_bot_envs
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
-
+max_steps = 2000
 
 class VecMonitor(VecEnvWrapper):
     def __init__(self, venv):
@@ -105,13 +105,12 @@ class VecMonitor(VecEnvWrapper):
         obs = self.venv.reset()
         self.eprets = np.zeros(self.num_envs, 'f')
         self.eplens = np.zeros(self.num_envs, 'i')
-        return obs
+        return [obs, np.expand_dims(self.eplens, axis=1)/max_steps]
 
     def step_wait(self):
         obs, rews, dones, infos = self.venv.step_wait()
         self.eprets += rews
         self.eplens += 1
-
         newinfos = list(infos[:])
         for i in range(len(dones)):
             if dones[i]:
@@ -124,7 +123,7 @@ class VecMonitor(VecEnvWrapper):
                 self.eprets[i] = 0
                 self.eplens[i] = 0
                 newinfos[i] = info
-        return obs, rews, dones, newinfos
+        return [obs, np.expand_dims(self.eplens, axis=1)/max_steps] , rews, dones, newinfos
 
 
 class MicroRTSStatsRecorder(VecEnvWrapper):
@@ -177,9 +176,9 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 envs = MicroRTSGridModeVecEnv(
     num_selfplay_envs=args.num_selfplay_envs,
     num_bot_envs=args.num_bot_envs,
-    max_steps=1200,
+    max_steps=max_steps,
     render_theme=2,
-    ai2s=[microrts_ai.coacAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
     map_path="maps/8x8/basesWorkers8x8.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
@@ -243,24 +242,26 @@ class Agent(nn.Module):
     def __init__(self, mapsize=8 * 8):
         super(Agent, self).__init__()
         self.mapsize = mapsize
-        self.network = nn.Sequential(
+        self.cnn = nn.Sequential(
             layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
             nn.Flatten(),
             layer_init(nn.Linear(128, 128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU() )
+            nn.ReLU(), )
+        self.fc = nn.Sequential(layer_init(nn.Linear(129, 128)), nn.ReLU())
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
 
-    def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+    def forward(self, x, time):
+        x = self.cnn(x.permute((0, 3, 1, 2)))
+        x = torch.cat([time, x], dim=1)
+        x = self.fc(x)
+        return x
 
-    def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
-        logits = self.actor(self.forward(x))
+    def get_action(self, x, time, action=None, invalid_action_masks=None, envs=None):
+        logits = self.actor(self.forward(x, time))
         grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
         split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
 
@@ -288,8 +289,8 @@ class Agent(nn.Module):
         invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
         return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
 
-    def get_value(self, x):
-        return self.critic(self.forward(x))
+    def get_value(self, x, time):
+        return self.critic(self.forward(x, time))
 
 
 agent = Agent().to(device)
@@ -303,6 +304,7 @@ mapsize = 8 * 8
 action_space_shape = (mapsize, envs.action_space.shape[0] - 1)
 invalid_action_shape = (mapsize, envs.action_space.nvec[1:].sum() + 1)
 
+times = torch.zeros((args.num_steps, args.num_envs) + (1,)).to(device)
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
 actions = torch.zeros((args.num_steps, args.num_envs) + action_space_shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -314,8 +316,10 @@ invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + invalid_act
 global_step = 0
 start_time = time.time()
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
-# https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
-next_obs = torch.Tensor(envs.reset()).to(device)
+# https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60[
+[next_obs, next_time] = envs.reset()
+next_obs = torch.Tensor(next_obs).to(device)
+next_time = torch.Tensor(next_time).to(device)
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
 
@@ -348,10 +352,11 @@ for update in range(starting_update, num_updates + 1):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
+        times[step] = next_time
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            values[step] = agent.get_value(obs[step]).flatten()
-            action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], envs=envs)
+            values[step] = agent.get_value(obs[step], times[step]).flatten()
+            action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], times[step], envs=envs)
 
         actions[step] = action
         logprobs[step] = logproba
@@ -381,8 +386,9 @@ for update in range(starting_update, num_updates + 1):
         java_valid_actions = JArray(JArray(JArray(JInt)))(java_valid_actions)
 
         try:
-            next_obs, rs, ds, infos = envs.step(java_valid_actions)
+            [next_obs, next_time], rs, ds, infos = envs.step(java_valid_actions)
             next_obs = torch.Tensor(next_obs).to(device)
+            next_time = torch.Tensor(next_time).to(device)
         except Exception as e:
             e.printStackTrace()
             raise
@@ -392,13 +398,14 @@ for update in range(starting_update, num_updates + 1):
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                 writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+                writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                 for key in info['microrts_stats']:
                     writer.add_scalar(f"charts/episode_reward/{key}", info['microrts_stats'][key], global_step)
                 break
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), next_time.to(device)).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -432,6 +439,7 @@ for update in range(starting_update, num_updates + 1):
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
     b_invalid_action_masks = invalid_action_masks.reshape((-1,) + invalid_action_shape)
+    b_times = times.view(-1, 1)
 
     # Optimizaing the policy and value network
     inds = np.arange(args.batch_size, )
@@ -446,6 +454,7 @@ for update in range(starting_update, num_updates + 1):
             # raise
             _, newlogproba, entropy, _ = agent.get_action(
                 b_obs[minibatch_ind],
+                b_times[minibatch_ind],
                 b_actions.long()[minibatch_ind],
                 b_invalid_action_masks[minibatch_ind],
                 envs)
@@ -461,7 +470,7 @@ for update in range(starting_update, num_updates + 1):
             entropy_loss = entropy.mean()
 
             # Value loss
-            new_values = agent.get_value(b_obs[minibatch_ind]).view(-1)
+            new_values = agent.get_value(b_obs[minibatch_ind], b_times[minibatch_ind]).view(-1)
             if args.clip_vloss:
                 v_loss_unclipped = ((new_values - b_returns[minibatch_ind]) ** 2)
                 v_clipped = b_values[minibatch_ind] + torch.clamp(new_values - b_values[minibatch_ind], -args.clip_coef,
@@ -476,6 +485,7 @@ for update in range(starting_update, num_updates + 1):
 
             optimizer.zero_grad()
             loss.backward()
+            grad_norm = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.parameters()) ** 0.5
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
@@ -487,6 +497,7 @@ for update in range(starting_update, num_updates + 1):
         wandb.save(f"agent.pt")
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/grad_norm", grad_norm, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("charts/update", update, global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)

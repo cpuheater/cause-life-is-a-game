@@ -26,7 +26,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
+    parser.add_argument('--gym-id', type=str, default="Microrts10-randomBiasedAI",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -179,7 +179,7 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=1200,
     render_theme=2,
-    ai2s=[microrts_ai.coacAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
     map_path="maps/8x8/basesWorkers8x8.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )

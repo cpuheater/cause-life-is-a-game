@@ -11,26 +11,72 @@ from gym_minigrid.wrappers import *
 cv2.ocl.setUseOpenCL(False)
 from matplotlib import pyplot as plt
 
-class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
+class RunningMeanStd(object):
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+    def __init__(self, epsilon=1e-4, shape=()):
+        self.mean = np.zeros(shape, 'float64')
+        self.var = np.ones(shape, 'float64')
+        self.count = epsilon
+
+    def update(self, x):
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * (self.count)
+        m_b = batch_var * (batch_count)
+        M2 = m_a + m_b + np.square(delta) * self.count * batch_count / (self.count + batch_count)
+        new_var = M2 / (self.count + batch_count)
+
+        new_count = batch_count + self.count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = new_count
+
+class FlatObsWrapper(gym.core.ObservationWrapper):
+    """Fully observable gridworld returning a flat grid encoding."""
 
     def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
+        super().__init__(env)
+
+        # Since the outer walls are always present, we remove left, right, top, bottom walls
+        # from the observation space of the agent. There are 3 channels, but for simplicity,
+        # we will deal with flattened version of state.
+
+        self.observation_space = spaces.Box(
             low=0,
             high=255,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.uint8,
+            shape=((self.env.width-2) * (self.env.height-2) * 3,),  # number of cells
+            dtype='uint8'
         )
+        self.unwrapped.max_steps = 5000
 
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
+    def observation(self, obs):
+        # this method is called in the step() function to get the observation
+        # we provide code that gets the grid state and places the agent in it
+        env = self.unwrapped
+        full_grid = env.grid.encode()
+        full_grid[env.agent_pos[0]][env.agent_pos[1]] = np.array([
+            OBJECT_TO_IDX['agent'],
+            COLOR_TO_IDX['red'],
+            env.agent_dir
+        ])
+        full_grid = full_grid[1:-1, 1:-1]   # remove outer walls of the environment (for efficiency)
+        flattened_grid = full_grid.flatten()
 
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
+        return flattened_grid
+
+    def render(self, *args, **kwargs):
+        """This removes the default visualization of the partially observable field of view."""
+        kwargs['highlight'] = False
+        return self.unwrapped.render(*args, **kwargs)
 
 import torch
 import torch.nn as nn
@@ -56,7 +102,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
+    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-16x16-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -96,7 +142,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.4,
+    parser.add_argument('--max-grad-norm', type=float, default=0.6,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
@@ -132,28 +178,18 @@ class InfoWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
         self._rewards = []
-        return obs["image"]
+        return obs
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self._rewards.append(reward)
-        vis_obs = obs["image"]
 
         if done:
             print(f"rewards: {sum(self._rewards)}")
             info = {"reward": sum(self._rewards),
                     "length": len(self._rewards)}
 
-        return vis_obs, reward, done, info
-
-class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84):
-        super().__init__(env)
-        self.observation_space = env.observation_space.spaces['image']
-        self.action_space = Discrete(5)
-
-    def observation(self, obs):
-        return obs
+        return obs, reward, done, info
 
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
@@ -194,16 +230,15 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 def make_env(seed):
     def thunk():
         env = gym.make(args.gym_id)
+        env = FlatObsWrapper(env)
         env = InfoWrapper(env)
-        env = WarpFrame(env)
-        env = wrap_pytorch(env)
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
     return thunk
 
-#envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
+#envs = VecPyTorch(DummyVecEnv([make_env(args.seed+i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
 envs = VecPyTorch(
     SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
@@ -226,20 +261,17 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3):
+    def __init__(self, envs):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            # Scale(1/255),
-            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
+            layer_init(nn.Linear(envs.observation_space.shape[0], 256)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            layer_init(nn.Linear(256, 256)),
             nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(980, 124)),
-            nn.ReLU()
-        )
-        self.actor = layer_init(nn.Linear(124, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(124, 1), std=1)
+            layer_init(nn.Linear(256, 256)),
+            nn.ReLU())
+        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(256, 1), std=1)
 
     def forward(self, x):
         return self.network(x)
@@ -256,6 +288,7 @@ class Agent(nn.Module):
     def get_value(self, x):
         return self.critic(self.forward(x))
 
+rms = RunningMeanStd(shape=(1, ))
 agent = Agent(envs).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:

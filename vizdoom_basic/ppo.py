@@ -320,9 +320,9 @@ for update in range(1, num_updates+1):
         #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
         #        break
         for info in infos:
-            if 'Episode_Total_Reward' in info.keys():
+            if 'reward' in info.keys():
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
-            if 'Episode_Total_Len' in info.keys():
+            if 'length' in info.keys():
                 writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit

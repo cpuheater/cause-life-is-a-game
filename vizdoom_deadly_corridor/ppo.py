@@ -183,8 +183,8 @@ class ViZDoomEnv:
         self.total_length += 1
 
         if done:
-            info['Episode_Total_Reward'] = self.total_reward
-            info['Episode_Total_Len'] = self.total_length
+            info['reward'] = self.total_reward
+            info['length'] = self.total_length
 
         return ob, reward, done, info
 
@@ -353,10 +353,10 @@ for update in range(1, num_updates+1):
         #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
         #        break
         for info in infos:
-            if 'Episode_Total_Reward' in info.keys():
-                writer.add_scalar("charts/episode_reward", info['Episode_Total_Reward'], global_step)
-            if 'Episode_Total_Len' in info.keys():
-                writer.add_scalar("charts/episode_length", info['Episode_Total_Len'], global_step)
+            if 'reward' in info.keys():
+                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
+            if 'length' in info.keys():
+                writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
