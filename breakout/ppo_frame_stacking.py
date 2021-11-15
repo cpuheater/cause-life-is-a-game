@@ -279,7 +279,7 @@ def wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=False, 
     if clip_rewards:
         env = ClipRewardEnv(env)
     if frame_stack:
-        env = FrameStack(env, 1)
+        env = FrameStack(env, 4)
     return env
 
 
@@ -472,7 +472,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=1):
+    def __init__(self, envs, frames=4):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),
