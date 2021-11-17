@@ -26,13 +26,13 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts8-workerRushAI-lstm",
+    parser.add_argument('--gym-id', type=str, default="Microrts16-coacAI-lstm",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=40000000,
+    parser.add_argument('--total-timesteps', type=int, default=50000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -183,8 +183,8 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
-    map_path="maps/8x8/basesWorkers8x8.xml",
+    ai2s=[microrts_ai.coacAI for _ in range(args.num_bot_envs)],
+    map_path="maps/16x16/basesWorkers16x16.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
@@ -337,7 +337,7 @@ def pad_sequence(sequence, target_length):
     return np.concatenate((sequence, padding), axis=0)
 
 class Agent(nn.Module):
-    def __init__(self, mapsize=8 * 8):
+    def __init__(self, mapsize=16 * 16):
         super(Agent, self).__init__()
         self.mapsize = mapsize
         self.network = nn.Sequential(
@@ -346,7 +346,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(128, args.rnn_hidden_size)),
+            layer_init(nn.Linear(32 * 6 * 6, args.rnn_hidden_size)),
             nn.ReLU())
 
         self.rnn = nn.LSTM(args.rnn_hidden_size, args.rnn_hidden_size, batch_first=True)
@@ -405,10 +405,10 @@ class Agent(nn.Module):
         logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
         entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
         num_predicted_parameters = len(envs.action_space.nvec) - 1
-        logprob = logprob.T.view(-1, 64, num_predicted_parameters)
-        entropy = entropy.T.view(-1, 64, num_predicted_parameters)
-        action = action.T.view(-1, 64, num_predicted_parameters)
-        invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
+        logprob = logprob.T.view(-1, 256, num_predicted_parameters)
+        entropy = entropy.T.view(-1, 256, num_predicted_parameters)
+        action = action.T.view(-1, 256, num_predicted_parameters)
+        invalid_action_masks = invalid_action_masks.view(-1, 256, envs.action_space.nvec[1:].sum() + 1)
         return self.critic(value), rnn_state, action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
 
     def get_value(self, x, rnn_state):
@@ -425,7 +425,7 @@ if args.anneal_lr:
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
-mapsize = 8 * 8
+mapsize = 16 * 16
 action_space_shape = (mapsize, envs.action_space.shape[0] - 1)
 invalid_action_shape = (mapsize, envs.action_space.nvec[1:].sum() + 1)
 
