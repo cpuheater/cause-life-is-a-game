@@ -26,9 +26,9 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts8-workerRushAI-lstm2",
+    parser.add_argument('--gym-id', type=str, default="Microrts8-workerRushAI-lstm",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -64,7 +64,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.5,
+    parser.add_argument('--max-grad-norm', type=float, default=0.9,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
@@ -181,7 +181,6 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 envs = MicroRTSGridModeVecEnv(
     num_selfplay_envs=args.num_selfplay_envs,
     num_bot_envs=args.num_bot_envs,
-    partial_obs=True,
     max_steps=2000,
     render_theme=2,
     ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
@@ -191,7 +190,7 @@ envs = MicroRTSGridModeVecEnv(
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
 if args.capture_video:
-   envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
+    envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x:  x % 500000 == 0, video_length=2000)
 # if args.prod_mode:
 #     envs = VecPyTorch(
@@ -342,7 +341,7 @@ class Agent(nn.Module):
         super(Agent, self).__init__()
         self.mapsize = mapsize
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(29, 16, kernel_size=3, stride=2)),
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
@@ -567,10 +566,10 @@ for update in range(starting_update, num_updates + 1):
                                              rnn_hidden_states, rnn_cell_states, invalid_action_masks)
         for batch in data_generator:
             b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask, b_invalid_action_masks = batch['vis_obs'], batch['actions'], \
-                                                                                                                                   batch['values'], batch['returns'], \
-                                                                                                                                   batch['log_probs'], batch['advantages'], \
-                                                                                                                                   batch["hxs"], batch["cxs"], batch["loss_mask"], \
-                                                                                                                                   batch["invalid_action_masks"]
+                                                                                                                                                           batch['values'], batch['returns'], \
+                                                                                                                                                           batch['log_probs'], batch['advantages'], \
+                                                                                                                                                           batch["hxs"], batch["cxs"], batch["loss_mask"], \
+                                                                                                                                                           batch["invalid_action_masks"]
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
             # raise
@@ -598,7 +597,7 @@ for update in range(starting_update, num_updates + 1):
             if args.clip_vloss:
                 v_loss_unclipped = ((new_values - b_returns) ** 2)
                 v_clipped = b_values + torch.clamp(new_values - b_values, -args.clip_coef,
-                                                                  args.clip_coef)
+                                                   args.clip_coef)
                 v_loss_clipped = (v_clipped - b_returns) ** 2
                 v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                 v_loss = 0.5 * masked_mean(v_loss_max, b_loss_mask)

@@ -64,7 +64,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.5,
+    parser.add_argument('--max-grad-norm', type=float, default=0.9,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
@@ -177,7 +177,6 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 envs = MicroRTSGridModeVecEnv(
     num_selfplay_envs=args.num_selfplay_envs,
     num_bot_envs=args.num_bot_envs,
-    partial_obs=True,
     max_steps=2000,
     render_theme=2,
     ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
@@ -187,7 +186,7 @@ envs = MicroRTSGridModeVecEnv(
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
 if args.capture_video:
-    envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
+        envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x: x % 10000000 == 0, video_length=2000)
 # if args.prod_mode:
 #     envs = VecPyTorch(
@@ -245,7 +244,7 @@ class Agent(nn.Module):
         super(Agent, self).__init__()
         self.mapsize = mapsize
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(29, 16, kernel_size=3, stride=2)),
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
@@ -391,6 +390,7 @@ for update in range(starting_update, num_updates + 1):
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                 writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+                writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                 for key in info['microrts_stats']:
                     writer.add_scalar(f"charts/episode_reward/{key}", info['microrts_stats'][key], global_step)
                 break
@@ -475,6 +475,7 @@ for update in range(starting_update, num_updates + 1):
 
             optimizer.zero_grad()
             loss.backward()
+            grad_norm = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.parameters()) ** 0.5
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
@@ -486,6 +487,7 @@ for update in range(starting_update, num_updates + 1):
         wandb.save(f"agent.pt")
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/grad_norm", grad_norm, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("charts/update", update, global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
