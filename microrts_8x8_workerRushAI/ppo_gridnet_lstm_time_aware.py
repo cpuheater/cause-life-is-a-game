@@ -28,7 +28,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="Microrts8-workerRushAI-lstm-time-aware",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -64,7 +64,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.5,
+    parser.add_argument('--max-grad-norm', type=float, default=0.9,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
@@ -244,7 +244,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
 
-def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states, invalid_action_masks):
+def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states, invalid_action_masks, times):
 
     # Supply training samples
     samples = {
@@ -257,7 +257,8 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32),
         "hxs": rnn_hidden_states.permute(1, 0, 2).cpu().numpy(),
         "cxs": cell_hidden_states.permute(1, 0, 2).cpu().numpy(),
-        "invalid_action_masks": invalid_action_masks.permute(1, 0, 2, 3).cpu().numpy()
+        "invalid_action_masks": invalid_action_masks.permute(1, 0, 2, 3).cpu().numpy(),
+        'times': times.permute(1, 0, 2).cpu().numpy(),
     }
 
     max_sequence_length = 1
@@ -345,7 +346,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
             nn.Flatten())
-        self.fc = nn.Sequential(layer_init(nn.Linear(128, args.rnn_hidden_size)),
+        self.fc = nn.Sequential(layer_init(nn.Linear(128+1, args.rnn_hidden_size)),
                                 nn.ReLU())
         self.rnn = nn.LSTM(args.rnn_hidden_size, args.rnn_hidden_size, batch_first=True)
         for name, param in self.rnn.named_parameters():
@@ -361,7 +362,9 @@ class Agent(nn.Module):
         self.leaky_relu = nn.LeakyReLU()
 
     def forward(self, x, time, rnn_state, seq_length=1):
-        x = self.network(x.permute((0, 3, 1, 2)))
+        x = self.cnn(x.permute((0, 3, 1, 2)))
+        x = torch.cat([time, x], dim=1)
+        x = self.fc(x)
         if seq_length == 1:
             x, rnn_state = self.rnn(x.unsqueeze(1), rnn_state)
             x = x.squeeze(1)
@@ -374,7 +377,7 @@ class Agent(nn.Module):
         return x, rnn_state
 
     def get_action(self, x, time, rnn_state, seq_length=1, action=None, invalid_action_masks=None, envs=None):
-        x, rnn_state = self.forward(x, rnn_state, seq_length)
+        x, rnn_state = self.forward(x, time, rnn_state, seq_length)
 
         x = self.leaky_relu(self.lin_hidden(x))
         value = self.leaky_relu(self.lin_value(x))
@@ -409,8 +412,8 @@ class Agent(nn.Module):
         invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
         return self.critic(value), rnn_state, action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
 
-    def get_value(self, x, rnn_state):
-        x, rnn_state = self.forward(x, rnn_state)
+    def get_value(self, x, time, rnn_state):
+        x, rnn_state = self.forward(x, time, rnn_state)
         x = self.leaky_relu(self.lin_hidden(x))
         value = self.leaky_relu(self.lin_value(x))
         return self.critic(value)
@@ -443,7 +446,9 @@ global_step = 0
 start_time = time.time()
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
-next_obs = torch.Tensor(envs.reset()).to(device)
+[next_obs, next_time] = envs.reset()
+next_obs = torch.Tensor(next_obs).to(device)
+next_time = torch.Tensor(next_time).to(device)
 next_done = torch.zeros(args.num_envs).to(device)
 rnn_hidden_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
 rnn_cell_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
@@ -480,10 +485,11 @@ for update in range(starting_update, num_updates + 1):
         dones[step] = next_done
         rnn_hidden_states[step] = rnn_hidden_state
         rnn_cell_states[step] = rnn_cell_state
+        times[step] = next_time
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
             #values[step] = agent.get_value(obs[step], (rnn_hidden_state, rnn_cell_state)).flatten()
-            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state), seq_length=1, envs=envs)
+            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], times[step], (rnn_hidden_state, rnn_cell_state), seq_length=1, envs=envs)
 
         actions[step] = action
         logprobs[step] = logproba
@@ -513,8 +519,9 @@ for update in range(starting_update, num_updates + 1):
         java_valid_actions = JArray(JArray(JArray(JInt)))(java_valid_actions)
 
         try:
-            next_obs, rs, ds, infos = envs.step(java_valid_actions)
+            [next_obs, next_time], rs, ds, infos = envs.step(java_valid_actions)
             next_obs = torch.Tensor(next_obs).to(device)
+            next_time = torch.Tensor(next_time).to(device)
         except Exception as e:
             e.printStackTrace()
             raise
@@ -533,7 +540,7 @@ for update in range(starting_update, num_updates + 1):
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), next_time, (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -562,18 +569,18 @@ for update in range(starting_update, num_updates + 1):
     # Optimizaing the policy and value network
     for i_epoch_pi in range(args.update_epochs):
         data_generator = recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns,
-                                             rnn_hidden_states, rnn_cell_states, invalid_action_masks)
+                                             rnn_hidden_states, rnn_cell_states, invalid_action_masks, times)
         for batch in data_generator:
-            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask, b_invalid_action_masks = batch['vis_obs'], batch['actions'], \
+            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask, b_invalid_action_masks, b_times = batch['vis_obs'], batch['actions'], \
                                                                                                                                                            batch['values'], batch['returns'], \
                                                                                                                                                            batch['log_probs'], batch['advantages'], \
                                                                                                                                                            batch["hxs"], batch["cxs"], batch["loss_mask"], \
-                                                                                                                                                           batch["invalid_action_masks"]
+                                                                                                                                                           batch["invalid_action_masks"], batch['times']
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
             # raise
             new_values, _, _, newlogproba, entropy, _ = agent.get_action(
-                b_obs,
+                b_obs, b_times,
                 (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
                 seq_length=args.seq_length,
                 action = b_actions.long(),

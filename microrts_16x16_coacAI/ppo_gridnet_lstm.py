@@ -28,11 +28,11 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="Microrts16-coacAI-lstm",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=3e-4,
+    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=50000000,
+    parser.add_argument('--total-timesteps', type=int, default=250000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -40,7 +40,7 @@ if __name__ == "__main__":
                         help='if toggled, cuda will not be enabled by default')
     parser.add_argument('--prod-mode', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='run the script in production mode and use wandb to log outputs')
-    parser.add_argument('--capture-video', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--capture-video', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
     parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
                         help="the wandb's project name")
@@ -64,7 +64,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.9,
+    parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.2,
                         help="the surrogate clipping coefficient")
@@ -528,6 +528,7 @@ for update in range(starting_update, num_updates + 1):
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                 writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+                writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                 for key in info['microrts_stats']:
                     writer.add_scalar(f"charts/episode_reward/{key}", info['microrts_stats'][key], global_step)
                 break
@@ -619,6 +620,7 @@ for update in range(starting_update, num_updates + 1):
         wandb.save(f"agent.pt")
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/grad_norm", grad_norm, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("charts/update", update, global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
