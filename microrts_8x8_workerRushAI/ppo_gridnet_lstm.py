@@ -28,7 +28,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="Microrts8-workerRushAI-lstm",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=3e-4,
+    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')

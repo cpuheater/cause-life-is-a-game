@@ -609,6 +609,7 @@ for update in range(starting_update, num_updates + 1):
 
             optimizer.zero_grad()
             loss.backward()
+            grad_norm = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.parameters()) ** 0.5
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
