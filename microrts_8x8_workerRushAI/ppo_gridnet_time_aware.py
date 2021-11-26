@@ -246,15 +246,17 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
-            nn.ReLU(),
-            nn.Flatten())
-        self.fc = nn.Sequential(layer_init(nn.Linear(129, 128)), nn.ReLU())
+            nn.ReLU())
+        self.fc = nn.Sequential(layer_init(nn.Linear(132, 128)), nn.ReLU())
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
 
     def forward(self, x, time):
         x = self.cnn(x.permute((0, 3, 1, 2)))
-        x = torch.cat([time, x], dim=1)
+        time = time.reshape((time.shape + (1, 1)))
+        time = time.repeat(1, 1, x.shape[-1], x.shape[-1])
+        x = torch.cat([x, time], dim=1)
+        x = x.view(x.shape[0], -1)
         x = self.fc(x)
         return x
 

@@ -28,7 +28,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="Microrts8-workerRushAI-lstm-time-aware",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=3e-4,
+    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -344,9 +344,8 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
-            nn.ReLU(),
-            nn.Flatten())
-        self.fc = nn.Sequential(layer_init(nn.Linear(128+1, args.rnn_hidden_size)),
+            nn.ReLU())
+        self.fc = nn.Sequential(layer_init(nn.Linear(132, args.rnn_hidden_size)),
                                 nn.ReLU())
         self.rnn = nn.LSTM(args.rnn_hidden_size, args.rnn_hidden_size, batch_first=True)
         for name, param in self.rnn.named_parameters():
@@ -363,7 +362,10 @@ class Agent(nn.Module):
 
     def forward(self, x, time, rnn_state, seq_length=1):
         x = self.cnn(x.permute((0, 3, 1, 2)))
-        x = torch.cat([time, x], dim=1)
+        time = time.reshape((time.shape + (1, 1)))
+        time = time.repeat(1, 1, x.shape[-1], x.shape[-1])
+        x = torch.cat([x, time], dim=1)
+        x = x.view(x.shape[0], -1)
         x = self.fc(x)
         if seq_length == 1:
             x, rnn_state = self.rnn(x.unsqueeze(1), rnn_state)

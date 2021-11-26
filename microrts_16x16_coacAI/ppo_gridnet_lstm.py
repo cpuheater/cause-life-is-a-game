@@ -28,11 +28,11 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="Microrts16-coacAI-lstm",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=250000000,
+    parser.add_argument('--total-timesteps', type=int, default=40000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -84,7 +84,7 @@ if __name__ == "__main__":
                         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
-    parser.add_argument('--rnn-hidden-size', type=int, default=512,
+    parser.add_argument('--rnn-hidden-size', type=int, default=720,
                         help='rnn hidden size')
     parser.add_argument('--seq-length', type=int, default=16,
                         help='seq length')
