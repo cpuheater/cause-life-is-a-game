@@ -298,7 +298,7 @@ class Agent(nn.Module):
         self.register_buffer("xymap", torch.cat((xmap,ymap),dim=1)) # shape (1, 2, conv2w, conv2h)
 
         att_elem_size = self.conv2_ch + 2
-        self.n_att_stack = self.conv2_ch
+        self.n_att_stack = 2
         self.attMod = AttentionModule(att_elem_size, self.node_size, self.n_heads)
 
         self.fc_seq = nn.Sequential(nn.Linear(22, 256), nn.ReLU(),

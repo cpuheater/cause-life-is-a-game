@@ -10,7 +10,7 @@ import skimage.transform
 from gym_minigrid.wrappers import *
 cv2.ocl.setUseOpenCL(False)
 from matplotlib import pyplot as plt
-
+from einops import rearrange
 
 class ImageToPyTorch(gym.ObservationWrapper):
     """
@@ -280,26 +280,33 @@ class Agent(nn.Module):
 
         self.conv1_ch = 16
         self.conv2_ch = 20
-        self.conv3_ch = 24
-        self.conv4_ch = 30
         self.node_size = 64
         self.ch_in = 3
         self.N = int(7 ** 2)
         self.n_heads = 3
         self.input_h_w = 7
-
+        self.sp_coord_dim = 2
+        self.out_dim = 5
         self.conv1 = nn.Conv2d(self.ch_in, self.conv1_ch, kernel_size=(1, 1), padding=0)
         self.conv2 = nn.Conv2d(self.conv1_ch, self.conv2_ch, kernel_size=(1, 1), padding=0)
 
-        xmap = np.linspace(-np.ones(self.input_h_w), np.ones(self.input_h_w), num=self.input_h_w, endpoint=True, axis=0)
-        xmap = torch.tensor(np.expand_dims(np.expand_dims(xmap,0),0), dtype=torch.float32, requires_grad=False)
-        ymap = np.linspace(-np.ones(self.input_h_w), np.ones(self.input_h_w), num=self.input_h_w, endpoint=True, axis=1)
-        ymap = torch.tensor(np.expand_dims(np.expand_dims(ymap,0),0), dtype=torch.float32, requires_grad=False)
-        self.register_buffer("xymap", torch.cat((xmap,ymap),dim=1)) # shape (1, 2, conv2w, conv2h)
+        self.proj_shape = (self.conv2_ch + self.sp_coord_dim, self.n_heads * self.node_size)
+        self.k_proj = layer_init(nn.Linear(*self.proj_shape))
+        self.q_proj = layer_init(nn.Linear(*self.proj_shape))
+        self.v_proj = layer_init(nn.Linear(*self.proj_shape))
 
-        att_elem_size = self.conv2_ch + 2
-        self.n_att_stack = self.conv2_ch
-        self.attMod = AttentionModule(att_elem_size, self.node_size, self.n_heads)
+        self.k_lin = layer_init(nn.Linear(self.node_size, self.N))  # B
+        self.q_lin = layer_init(nn.Linear(self.node_size, self.N))
+        self.a_lin = layer_init(nn.Linear(self.N, self.N))
+
+        self.node_shape = (self.n_heads, self.N, self.node_size)
+        self.k_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+        self.q_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+        self.v_norm = nn.LayerNorm(self.node_shape, elementwise_affine=True)
+
+        self.linear1 = layer_init(nn.Linear(self.n_heads * self.node_size, self.node_size))
+        self.norm1 = nn.LayerNorm([self.N, self.node_size], elementwise_affine=False)
+        self.linear2 = nn.Linear(self.node_size, self.out_dim)
 
         self.fc_seq = nn.Sequential(nn.Linear(22, 256), nn.ReLU(),
                                     nn.Linear(256, 256), nn.ReLU(),
@@ -307,27 +314,48 @@ class Agent(nn.Module):
         self.critic = layer_init(nn.Linear(256, 1), std=1)
         self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
 
+
     def forward(self, x):
         N, Cin, H, W = x.shape
         x = self.conv1(x)
         x = torch.relu(x)
         x = self.conv2(x)
         x = torch.relu(x)
-        batchsize = x.size(0)
-        batch_maps = self.xymap.repeat(batchsize,1,1,1,)
-        x = torch.cat((x,batch_maps),1)
+        _, _, cH, cW = x.shape
 
-        a = x.view(x.size(0),x.size(1), -1).transpose(1,2)
-        for i_att in range(self.n_att_stack):
-            a = self.attMod(a)
+        xcoords = torch.arange(cW).repeat(cH, 1).float().to(device) / cW
+        ycoords = torch.arange(cH).repeat(cW, 1).transpose(1, 0).float().to(device) / cH
+        spatial_coords = torch.stack([xcoords, ycoords], dim=0)
+        spatial_coords = spatial_coords.unsqueeze(dim=0)
+        spatial_coords = spatial_coords.repeat(N, 1, 1, 1)
 
-        kernelsize = a.shape[1]
+        x = torch.cat([x, spatial_coords], dim=1)
+        x = x.permute(0, 2, 3, 1)
+        x = x.flatten(1, 2)
 
-        if type(kernelsize) == torch.Tensor:
-            kernelsize = kernelsize.item()
-        pooled = F.max_pool1d(a.transpose(1,2), kernel_size=kernelsize)
-        out = self.fc_seq(pooled.view(pooled.size(0),pooled.size(1)))
-        return out
+        K = rearrange(self.k_proj(x), "b n (head d) -> b head n d", head=self.n_heads)
+        K = self.k_norm(K)
+
+        Q = rearrange(self.q_proj(x), "b n (head d) -> b head n d", head=self.n_heads)
+        Q = self.q_norm(Q)
+
+        V = rearrange(self.v_proj(x), "b n (head d) -> b head n d", head=self.n_heads)
+        V = self.v_norm(V)
+        A = torch.nn.functional.elu(self.q_lin(Q) + self.k_lin(K))  # D
+        A = self.a_lin(A)
+        A = torch.nn.functional.softmax(A, dim=3)
+        with torch.no_grad():
+            self.att_map = A.clone()  # E
+        E = torch.einsum('bhfc,bhcd->bhfd', A, V)  # F
+        E = rearrange(E, 'b head n d -> b n (head d)')
+        E = self.linear1(E)
+        E = torch.relu(E)
+        E = self.norm1(E)
+        E = E.max(dim=1)[0]
+        y = self.linear2(E)
+        y = torch.nn.functional.elu(y)
+        return y
+
 
     def get_action(self, x, action=None):
         x = self.forward(x)
