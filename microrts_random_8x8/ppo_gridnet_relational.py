@@ -291,8 +291,8 @@ class Agent(nn.Module):
     def forward(self, x):
         N = x.shape[0]
         x = self.conv(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
-        _, _, cH, cW = x.shape
-        loc = torch.arange(cW * cH).float().to(device) / (cW * cH)
+        _, _, h, w = x.shape
+        loc = torch.arange(w * h).float().to(device) / (w * h)
         loc = loc.view(loc.shape[0], 1)
         loc = loc.repeat(N, 1, 1)
         x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)

@@ -321,10 +321,10 @@ class Agent(nn.Module):
         x = torch.relu(x)
         x = self.conv2(x)
         x = torch.relu(x)
-        _, _, cH, cW = x.shape
+        _, _, h, w = x.shape
 
-        xcoords = torch.arange(cW).repeat(cH, 1).float().to(device) / cW
-        ycoords = torch.arange(cH).repeat(cW, 1).transpose(1, 0).float().to(device) / cH
+        xcoords = torch.arange(w).repeat(h, 1).float().to(device) / w
+        ycoords = torch.arange(h).repeat(w, 1).transpose(1, 0).float().to(device) / h
         spatial_coords = torch.stack([xcoords, ycoords], dim=0)
         spatial_coords = spatial_coords.unsqueeze(dim=0)
         spatial_coords = spatial_coords.repeat(N, 1, 1, 1)
