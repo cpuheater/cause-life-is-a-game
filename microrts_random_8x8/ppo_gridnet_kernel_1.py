@@ -26,7 +26,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
+    parser.add_argument('--gym-id', type=str, default="Microrts10-randomBiasedAI",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -179,7 +179,7 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
     map_path="maps/8x8/basesWorkers8x8.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
@@ -238,73 +238,24 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, embed_size, heads):
-        super(MultiHeadAttention, self).__init__()
-        self.embed_size = embed_size
-        self.heads = heads
-        self.head_dim = embed_size // heads
-        self.values = nn.Linear(self.head_dim, self.head_dim, bias=False)
-        self.keys = nn.Linear(self.head_dim, self.head_dim, bias=False)
-        self.queries = nn.Linear(self.head_dim, self.head_dim, bias=False)
-        self.fc_out = nn.Linear(heads * self.head_dim, embed_size)
-
-    def forward(self, values, keys, query):
-        N = query.shape[0]
-        seq_len = values.shape[1]
-        values = values.reshape(N, seq_len, self.heads, self.head_dim)
-        keys = keys.reshape(N, seq_len, self.heads, self.head_dim)
-        query = query.reshape(N, seq_len, self.heads, self.head_dim)
-        values = self.values(values)  # (N, seq_len, heads, head_dim)
-        keys = self.keys(keys)
-        queries = self.queries(query)
-
-        energy = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-
-        attention = torch.softmax(energy / (self.embed_size ** (1 / 2)), dim=3)
-
-        out = torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(
-            N, seq_len, self.heads * self.head_dim
-        )
-        out = self.fc_out(out)
-        return out
 
 class Agent(nn.Module):
     def __init__(self, mapsize=8 * 8):
         super(Agent, self).__init__()
         self.mapsize = mapsize
-        self.conv = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=2, stride=1)),
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27, 16, kernel_size=1, stride=1)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 31, kernel_size=2)),
-            nn.ReLU())
-        self.embed_dim = 32
-        self.heads = 4
-
-        self.mha = MultiHeadAttention(self.embed_dim, self.heads)
-        self.fc = nn.Sequential(layer_init(nn.Linear(32, 128)), nn.ReLU())
-        self.layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
-        self.dropout = nn.Dropout(0.0)
+            layer_init(nn.Conv2d(16, 31, kernel_size=1)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(1984, 128)), nn.ReLU(), )
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
 
     def forward(self, x):
-        N = x.shape[0]
-        x = self.conv(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
-        _, _, cH, cW = x.shape
-        loc = torch.arange(cW * cH).float().to(device) / (cW * cH)
-        loc = loc.view(loc.shape[0], 1)
-        loc = loc.repeat(N, 1, 1)
-        x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)
-        x = torch.cat([x, loc], dim=2)
-
-        out = self.mha(x, x, x)
-        out = self.dropout(out)
-        out = self.layer_norm(out + x)
-        out, _ = out.max(dim=1)
-        out = self.fc(out)
-        return out
-
+        x =  self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+        return x
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
         grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
@@ -437,8 +388,8 @@ for update in range(starting_update, num_updates + 1):
         for info in infos:
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-                writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                 writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
+                writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                 for key in info['microrts_stats']:
                     writer.add_scalar(f"charts/episode_reward/{key}", info['microrts_stats'][key], global_step)
                 break

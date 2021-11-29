@@ -64,7 +64,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.9,
+    parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
@@ -180,7 +180,7 @@ envs = MicroRTSGridModeVecEnv(
     render_theme=2,
     ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
     map_path="maps/8x8/basesWorkers8x8.xml",
-    reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
+    reward_weight=np.array([15.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
@@ -247,16 +247,14 @@ class Agent(nn.Module):
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU())
-        self.fc = nn.Sequential(layer_init(nn.Linear(132, 128)), nn.ReLU())
+        self.fc = nn.Sequential(layer_init(nn.Linear(129, 128)), nn.ReLU())
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
 
     def forward(self, x, time):
         x = self.cnn(x.permute((0, 3, 1, 2)))
-        time = time.reshape((time.shape + (1, 1)))
-        time = time.repeat(1, 1, x.shape[-1], x.shape[-1])
+        x = x.reshape(x.shape[0], -1)
         x = torch.cat([x, time], dim=1)
-        x = x.view(x.shape[0], -1)
         x = self.fc(x)
         return x
 

@@ -1,5 +1,5 @@
 ### Solving video games with Deep Reinforcement Learning!
-Each directory represents a particular game, within a directory you can find files and each of these files is a self-contained rl algorithm that is tuned to solve this particular game. 
+Each directory represents a particular game, within a directory you can find files and each of these files is a self-contained rl algorithm, that is tuned to solve that particular game. 
 An algorithm might have one or many extensions. You can determine the name of the algorithm and the type of the extension from the name of the file.      
   
 ### List of algorithms:
@@ -23,4 +23,4 @@ An algorithm might have one or many extensions. You can determine the name of th
 
 The core algorithms are based on [cleanrl](https://github.com/vwxyzjn/cleanrl) and comes with many 
 cleanrl goodies like: tensorboard logging, videos of gameplay capturing, experiment 
-management with [Weights and Biases](https://wandb.ai/site). 
+management with [weights and biases](https://wandb.ai/site). 
