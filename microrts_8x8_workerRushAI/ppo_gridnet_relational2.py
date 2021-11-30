@@ -276,7 +276,7 @@ class Agent(nn.Module):
         self.conv = nn.Sequential(
             layer_init(nn.Conv2d(27, 16, kernel_size=2, stride=1)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 31, kernel_size=2)),
+            layer_init(nn.Conv2d(16, 30, kernel_size=2)),
             nn.ReLU())
         self.embed_dim = 32
         self.heads = 4
@@ -284,6 +284,7 @@ class Agent(nn.Module):
         self.mha = MultiHeadAttention(self.embed_dim, self.heads)
         self.fc = nn.Sequential(layer_init(nn.Linear(32, 128)), nn.ReLU())
         self.layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
+        self.dropout = nn.Dropout(0.0)
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
 
@@ -291,13 +292,17 @@ class Agent(nn.Module):
         N = x.shape[0]
         x = self.conv(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
         _, _, h, w = x.shape
-        loc = torch.arange(w * h).float().to(device) / (w * h)
-        loc = loc.view(loc.shape[0], 1)
-        loc = loc.repeat(N, 1, 1)
-        x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)
-        x = torch.cat([x, loc], dim=2)
-        x = self.layer_norm(x)
+        x_pos_enc = torch.arange(w).repeat(h, 1).float().to(device) / w
+        y_pos_enc = torch.arange(h).repeat(w, 1).transpose(1, 0).float().to(device) / h
+        pos_enc = torch.stack([x_pos_enc, y_pos_enc], dim=0)
+        pos_enc = pos_enc.unsqueeze(dim=0)
+        pos_enc = pos_enc.repeat(N, 1, 1, 1)
+        x = torch.cat([x, pos_enc], dim=1)
+        x = x.permute(0, 2, 3, 1)
+        x = x.flatten(1, 2)
+
         out = self.mha(x, x, x)
+        out = self.dropout(out)
         out = self.layer_norm(out + x)
         out, _ = out.max(dim=1)
         out = self.fc(out)
@@ -531,11 +536,6 @@ for update in range(starting_update, num_updates + 1):
             os.makedirs(f"models/{experiment_name}")
         torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
         wandb.save(f"agent.pt")
-    print(global_step)
-    if global_step % 100 == 0:
-        if not os.path.exists(f"models/{experiment_name}"):
-            os.makedirs(f"models/{experiment_name}")
-        torch.save(agent.state_dict(), f"models/{experiment_name}/agent_{global_step}.pt")
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/grad_norm", grad_norm, global_step)

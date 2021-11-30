@@ -64,7 +64,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.5,
+    parser.add_argument('--max-grad-norm', type=float, default=0.9,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
@@ -238,70 +238,24 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, embed_size, heads):
-        super(MultiHeadAttention, self).__init__()
-        self.embed_size = embed_size
-        self.heads = heads
-        self.head_dim = embed_size // heads
-        self.values = nn.Linear(self.head_dim, self.head_dim, bias=False)
-        self.keys = nn.Linear(self.head_dim, self.head_dim, bias=False)
-        self.queries = nn.Linear(self.head_dim, self.head_dim, bias=False)
-        self.fc_out = nn.Linear(heads * self.head_dim, embed_size)
-
-    def forward(self, values, keys, query):
-        N = query.shape[0]
-        seq_len = values.shape[1]
-        values = values.reshape(N, seq_len, self.heads, self.head_dim)
-        keys = keys.reshape(N, seq_len, self.heads, self.head_dim)
-        query = query.reshape(N, seq_len, self.heads, self.head_dim)
-        values = self.values(values)  # (N, seq_len, heads, head_dim)
-        keys = self.keys(keys)
-        queries = self.queries(query)
-
-        energy = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-
-        attention = torch.softmax(energy / (self.embed_size ** (1 / 2)), dim=3)
-
-        out = torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(
-            N, seq_len, self.heads * self.head_dim
-        )
-        out = self.fc_out(out)
-        return out
 
 class Agent(nn.Module):
     def __init__(self, mapsize=8 * 8):
         super(Agent, self).__init__()
         self.mapsize = mapsize
-        self.conv = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=2, stride=1)),
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 31, kernel_size=2)),
-            nn.ReLU())
-        self.embed_dim = 32
-        self.heads = 4
-
-        self.mha = MultiHeadAttention(self.embed_dim, self.heads)
-        self.fc = nn.Sequential(layer_init(nn.Linear(32, 128)), nn.ReLU())
-        self.layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
+            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(), )
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
 
     def forward(self, x):
-        N = x.shape[0]
-        x = self.conv(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
-        _, _, h, w = x.shape
-        loc = torch.arange(w * h).float().to(device) / (w * h)
-        loc = loc.view(loc.shape[0], 1)
-        loc = loc.repeat(N, 1, 1)
-        x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)
-        x = torch.cat([x, loc], dim=2)
-        x = self.layer_norm(x)
-        out = self.mha(x, x, x)
-        out = self.layer_norm(out + x)
-        out, _ = out.max(dim=1)
-        out = self.fc(out)
-        return out
+        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
@@ -531,11 +485,6 @@ for update in range(starting_update, num_updates + 1):
             os.makedirs(f"models/{experiment_name}")
         torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
         wandb.save(f"agent.pt")
-    print(global_step)
-    if global_step % 100 == 0:
-        if not os.path.exists(f"models/{experiment_name}"):
-            os.makedirs(f"models/{experiment_name}")
-        torch.save(agent.state_dict(), f"models/{experiment_name}/agent_{global_step}.pt")
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/grad_norm", grad_norm, global_step)
