@@ -20,6 +20,8 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+from sil import sil_module
+import copy
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -64,7 +66,7 @@ if __name__ == "__main__":
                         help="coefficient of the entropy")
     parser.add_argument('--vf-coef', type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument('--max-grad-norm', type=float, default=0.9,
+    parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
@@ -84,6 +86,17 @@ if __name__ == "__main__":
                         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+
+    # SIL
+    parser.add_argument('--num-update', type=int, default=10, help='')
+    parser.add_argument('--capacity', type=int, default=18000, help='')
+    parser.add_argument('--sil-beta', type=float, default=0.1, help='')
+    parser.add_argument('--sil-alpha', type=float, default=0.6, help='')
+    parser.add_argument('--max-nlogp', type=int, default=5, help='')
+    parser.add_argument('--mini-batch-size', type=int, default=512, help='')
+    parser.add_argument('--clip', type=int, default=100, help='')
+    parser.add_argument('--w-value', type=float, default=0.05, help='')
+    parser.add_argument('--sil-entropy-coef', type=float, default=0.01, help='')
 
     args = parser.parse_args()
     #if not args.seed:
@@ -292,6 +305,7 @@ class Agent(nn.Module):
 
 agent = Agent().to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+sil = sil_module(agent, args, optimizer, envs)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
@@ -308,6 +322,7 @@ rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + invalid_action_shape).to(device)
+wins = np.zeros((args.num_steps, args.num_envs))
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 start_time = time.time()
@@ -385,15 +400,19 @@ for update in range(starting_update, num_updates + 1):
             e.printStackTrace()
             raise
         rewards[step], next_done = torch.Tensor(rs).to(device), torch.Tensor(ds).to(device)
-
-        for info in infos:
+        wins[step, :] = 0
+        for idx, info in enumerate(infos):
             if 'episode' in info.keys():
                 print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                 writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                 writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                 for key in info['microrts_stats']:
                     writer.add_scalar(f"charts/episode_reward/{key}", info['microrts_stats'][key], global_step)
+                    if info['microrts_stats']["WinLossRewardFunction"] > 0:
+                        print(f"winner step: {step} index: {idx}")
+                        wins[step][idx] = 1
                 break
+        sil.step(obs[step].cpu().numpy(), action.cpu().numpy(), copy.deepcopy(rs.reshape(-1)), ds, invalid_action_masks[step].cpu().numpy(), wins[step])
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
@@ -485,6 +504,7 @@ for update in range(starting_update, num_updates + 1):
             os.makedirs(f"models/{experiment_name}")
         torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
         wandb.save(f"agent.pt")
+    sil.train_sil_model()
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/grad_norm", grad_norm, global_step)
