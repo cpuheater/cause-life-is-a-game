@@ -1,5 +1,5 @@
 ### Solving video games with Deep Reinforcement Learning!
-Each directory represents a particular game, within a directory you can find files and each of these files is a self-contained rl algorithm, that is tuned to solve that particular game. 
+Each file is a self-contained rl algorithm, tuned to solve that particular game. 
 An algorithm might have one or many extensions. You can determine the name of the algorithm and the type of the extension from the name of the file.      
   
 ### List of algorithms:

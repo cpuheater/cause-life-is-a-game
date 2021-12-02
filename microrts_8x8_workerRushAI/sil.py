@@ -283,8 +283,9 @@ class sil_module:
                     max_nlogp = max_nlogp.cuda()
                     invalid_action_masks = invalid_action_masks.cuda()
                 # start to next...
-                value, _, action_log_probs, dist_entropy, _ = self.network.get_action(obs, actions,
+                _, action_log_probs, dist_entropy, _= self.network.get_action(obs, actions,
                                                                                    invalid_action_masks, self.envs)
+                value = self.network.get_value(obs)
                 #value, pi = self.model.get_action(obs, actions)
                 #action_log_probs, dist_entropy = evaluate_actions_sil(pi, actions)
                 action_log_probs = -action_log_probs
