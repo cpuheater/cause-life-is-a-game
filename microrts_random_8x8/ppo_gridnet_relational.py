@@ -292,11 +292,11 @@ class Agent(nn.Module):
         N = x.shape[0]
         x = self.conv(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
         _, _, h, w = x.shape
-        loc = torch.arange(w * h).float().to(device) / (w * h)
-        loc = loc.view(loc.shape[0], 1)
-        loc = loc.repeat(N, 1, 1)
+        pos_enc = torch.arange(w * h).float().to(device) / (w * h)
+        pos_enc = pos_enc.view(pos_enc.shape[0], 1)
+        pos_enc = pos_enc.repeat(N, 1, 1)
         x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)
-        x = torch.cat([x, loc], dim=2)
+        x = torch.cat([x, pos_enc], dim=2)
 
         out = self.mha(x, x, x)
         out = self.dropout(out)
