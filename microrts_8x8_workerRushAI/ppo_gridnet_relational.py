@@ -249,22 +249,16 @@ class MultiHeadAttention(nn.Module):
         self.queries = nn.Linear(self.head_dim, self.head_dim, bias=False)
         self.fc_out = nn.Linear(heads * self.head_dim, embed_size)
 
-    def forward(self, values, keys, query):
-        N = query.shape[0]
-        seq_len = values.shape[1]
-        values = values.reshape(N, seq_len, self.heads, self.head_dim)
-        keys = keys.reshape(N, seq_len, self.heads, self.head_dim)
-        query = query.reshape(N, seq_len, self.heads, self.head_dim)
-        values = self.values(values)  # (N, seq_len, heads, head_dim)
-        keys = self.keys(keys)
-        queries = self.queries(query)
-
-        energy = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-
+    def forward(self, x):
+        b, seq_len = x.shape[0], x.shape[1]
+        x = x.reshape(b, seq_len, self.heads, self.head_dim)
+        v = self.values(x)
+        k = self.keys(x)
+        q = self.queries(x)
+        energy = torch.einsum("nqhd,nkhd->nhqk", [q, k])
         attention = torch.softmax(energy / (self.embed_size ** (1 / 2)), dim=3)
-
-        out = torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(
-            N, seq_len, self.heads * self.head_dim
+        out = torch.einsum("nhql,nlhd->nqhd", [attention, v]).reshape(
+            b, seq_len, self.heads * self.head_dim
         )
         out = self.fc_out(out)
         return out
@@ -289,7 +283,7 @@ class Agent(nn.Module):
 
     def forward(self, x):
         N = x.shape[0]
-        x = self.conv(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+        x = self.conv(x.permute((0, 3, 1, 2)))
         _, _, h, w = x.shape
         pos_enc = torch.arange(w * h).float().to(device) / (w * h)
         pos_enc = pos_enc.view(pos_enc.shape[0], 1)
@@ -297,7 +291,7 @@ class Agent(nn.Module):
         x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)
         x = torch.cat([x, pos_enc], dim=2)
         x = self.layer_norm(x)
-        out = self.mha(x, x, x)
+        out = self.mha(x)
         out = self.layer_norm(out + x)
         out, _ = out.max(dim=1)
         out = self.fc(out)
