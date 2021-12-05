@@ -483,28 +483,14 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(3136, 256)),
+            layer_init(nn.Linear(3136, 512)),
             nn.ReLU()
         )
+        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(512, 1), std=1)
 
-        self.fc1 = layer_init(nn.Linear(256, 256))
-        self.fc2 = layer_init(nn.Linear(512, 256))
-        self.fc3 = layer_init(nn.Linear(512, 256))
-        self.fc4 = layer_init(nn.Linear(512, 256))
-
-        self.actor = layer_init(nn.Linear(256, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
-
-    def forward(self, state):
-        state = self.network(state)
-        x = F.relu(self.fc1(state), inplace=True)
-        x = torch.cat([x, state], dim=1)
-        x = F.relu(self.fc2(x), inplace=True)
-        x = torch.cat([x, state], dim=1)
-        x = F.relu(self.fc3(x), inplace=True)
-        x = torch.cat([x, state], dim=1)
-        x = F.relu(self.fc4(x), inplace=True)
-        return x
+    def forward(self, x):
+        return self.network(x)
 
     def get_action(self, x, action=None):
         logits = self.actor(self.forward(x))
