@@ -20,6 +20,7 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+from einops import rearrange
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -238,6 +239,46 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class MultiHeadAttention2(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=None):
+        super().__init__()
+        self.dim_head = (int(dim / heads)) if dim_head is None else dim_head
+        _dim = self.dim_head * heads
+        self.heads = heads
+        self.to_qvk = nn.Linear(dim, _dim * 3, bias=False)
+        self.W_0 = nn.Linear( _dim, dim, bias=False)
+        self.scale_factor = self.dim_head ** -0.5
+
+    def forward(self, x, mask=None):
+        assert x.dim() == 3
+        # Step 1
+        qkv = self.to_qvk(x)  # [batch, tokens, dim*3*heads ]
+
+        # Step 2
+        # decomposition to q,v,k and cast to tuple
+        # the resulted shape before casting to tuple will be:
+        # [3, batch, heads, tokens, dim_head]
+        q, k, v = tuple(rearrange(qkv, 'b t (d k h) -> k b h t d ', k=3, h=self.heads))
+
+        # Step 3
+        # resulted shape will be: [batch, heads, tokens, tokens]
+        scaled_dot_prod = torch.einsum('b h i d , b h j d -> b h i j', q, k) * self.scale_factor
+
+        if mask is not None:
+            assert mask.shape == scaled_dot_prod.shape[2:]
+            scaled_dot_prod = scaled_dot_prod.masked_fill(mask, -np.inf)
+
+        attention = torch.softmax(scaled_dot_prod, dim=-1)
+
+        # Step 4. Calc result per batch and per head h
+        out = torch.einsum('b h i j , b h j d -> b h i d', attention, v)
+
+        # Step 5. Re-compose: merge heads with dim_head d
+        out = rearrange(out, "b h t d -> b t (h d)")
+
+        # Step 6. Apply final linear transformation layer
+        return self.W_0(out)
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, embed_size, heads):
         super(MultiHeadAttention, self).__init__()
@@ -256,7 +297,7 @@ class MultiHeadAttention(nn.Module):
         k = self.keys(x)
         q = self.queries(x)
         energy = torch.einsum("nqhd,nkhd->nhqk", [q, k])
-        attention = torch.softmax(energy / (self.embed_size ** (1 / 2)), dim=3)
+        attention = torch.softmax(energy / (self.head_dim ** (1 / 2)), dim=3)
         out = torch.einsum("nhql,nlhd->nqhd", [attention, v]).reshape(
             b, seq_len, self.heads * self.head_dim
         )
@@ -277,7 +318,8 @@ class Agent(nn.Module):
 
         self.mha = MultiHeadAttention(self.embed_dim, self.heads)
         self.fc = nn.Sequential(layer_init(nn.Linear(32, 128)), nn.ReLU())
-        self.layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
 
@@ -290,9 +332,9 @@ class Agent(nn.Module):
         pos_enc = pos_enc.repeat(N, 1, 1)
         x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)
         x = torch.cat([x, pos_enc], dim=2)
-        x = self.layer_norm(x)
+        x = self.layer_norm1(x)
         out = self.mha(x)
-        out = self.layer_norm(out + x)
+        out = self.layer_norm2(out + x)
         out, _ = out.max(dim=1)
         out = self.fc(out)
         return out
