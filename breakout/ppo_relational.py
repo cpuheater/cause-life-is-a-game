@@ -471,6 +471,31 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class MultiHeadAttention(nn.Module):
+    def __init__(self, embed_size, heads):
+        super(MultiHeadAttention, self).__init__()
+        self.embed_size = embed_size
+        self.heads = heads
+        self.head_dim = embed_size // heads
+        self.values = nn.Linear(self.head_dim, self.head_dim, bias=False)
+        self.keys = nn.Linear(self.head_dim, self.head_dim, bias=False)
+        self.queries = nn.Linear(self.head_dim, self.head_dim, bias=False)
+        self.fc_out = nn.Linear(heads * self.head_dim, embed_size)
+
+    def forward(self, x):
+        b, seq_len = x.shape[0], x.shape[1]
+        x = x.reshape(b, seq_len, self.heads, self.head_dim)
+        v = self.values(x)
+        k = self.keys(x)
+        q = self.queries(x)
+        energy = torch.einsum("nqhd,nkhd->nhqk", [q, k])
+        attention = torch.softmax(energy / (self.head_dim ** (1 / 2)), dim=3)
+        out = torch.einsum("nhql,nlhd->nqhd", [attention, v]).reshape(
+            b, seq_len, self.heads * self.head_dim
+        )
+        out = self.fc_out(out)
+        return out
+
 class Agent(nn.Module):
     def __init__(self, envs, frames=1):
         super(Agent, self).__init__()
@@ -481,16 +506,17 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(3136, 512)),
             nn.ReLU()
         )
+        self.embed_dim = 32
+        self.heads = 4
+        self.mha = MultiHeadAttention(self.embed_dim, self.heads)
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def forward(self, x):
-        return self.network(x)
+        x = self.network(x)
+        return x
 
     def get_action(self, x, action=None):
         logits = self.actor(self.forward(x))
