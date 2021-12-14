@@ -499,24 +499,38 @@ class MultiHeadAttention(nn.Module):
 class Agent(nn.Module):
     def __init__(self, envs, frames=1):
         super(Agent, self).__init__()
-        self.network = nn.Sequential(
+        self.conv = nn.Sequential(
             Scale(1/255),
-            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(frames, 16, 3, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            layer_init(nn.Conv2d(16, 31, 3, stride=2)),
             nn.ReLU()
         )
         self.embed_dim = 32
         self.heads = 4
+
         self.mha = MultiHeadAttention(self.embed_dim, self.heads)
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
+        self.fc = nn.Sequential(layer_init(nn.Linear(32, 128)), nn.ReLU())
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
+        self.actor = layer_init(nn.Linear(128, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(128, 1), std=1)
 
     def forward(self, x):
-        x = self.network(x)
-        return x
+        N = x.shape[0]
+        x = self.conv(x)
+        _, _, h, w = x.shape
+        pos_enc = torch.arange(w * h).float().to(device) / (w * h)
+        pos_enc = pos_enc.view(pos_enc.shape[0], 1)
+        pos_enc = pos_enc.repeat(N, 1, 1)
+        x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)
+        x = torch.cat([x, pos_enc], dim=2)
+        x = self.layer_norm1(x)
+        out = self.mha(x)
+        out = self.layer_norm2(out + x)
+        out, _ = out.max(dim=1)
+        out = self.fc(out)
+        return out
 
     def get_action(self, x, action=None):
         logits = self.actor(self.forward(x))

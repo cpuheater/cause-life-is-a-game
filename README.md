@@ -3,7 +3,7 @@ Each file is a self-contained rl algorithm, tuned to solve that particular game.
 An algorithm might have one or many extensions. You can determine the name of the algorithm and the type of the extension from the name of the file.      
   
 ### List of algorithms:
-* ppo  - Proximal Policy Optimization Algorithms (https://arxiv.org/abs/1707.06347)    
+* ppo  - Proximal Policy Optimization Algorithm (https://arxiv.org/abs/1707.06347)    
 * ppo_lstm - ppo with recurrent policy using LSTM
 * ppo_gru - ppo with recurrent policy using GRU 
 * sac_dis - Soft Actor-Critic for Discrete Action Settings (https://arxiv.org/abs/1910.07207)
