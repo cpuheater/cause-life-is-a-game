@@ -20,13 +20,14 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+from einops import rearrange
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts10-randomBiasedAI",
+    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -179,7 +180,7 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
     map_path="maps/8x8/basesWorkers8x8.xml",
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
@@ -249,22 +250,16 @@ class MultiHeadAttention(nn.Module):
         self.queries = nn.Linear(self.head_dim, self.head_dim, bias=False)
         self.fc_out = nn.Linear(heads * self.head_dim, embed_size)
 
-    def forward(self, values, keys, query):
-        N = query.shape[0]
-        seq_len = values.shape[1]
-        values = values.reshape(N, seq_len, self.heads, self.head_dim)
-        keys = keys.reshape(N, seq_len, self.heads, self.head_dim)
-        query = query.reshape(N, seq_len, self.heads, self.head_dim)
-        values = self.values(values)  # (N, seq_len, heads, head_dim)
-        keys = self.keys(keys)
-        queries = self.queries(query)
-
-        energy = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-
+    def forward(self, x):
+        b, seq_len = x.shape[0], x.shape[1]
+        x = x.reshape(b, seq_len, self.heads, self.head_dim)
+        v = self.values(x)
+        k = self.keys(x)
+        q = self.queries(x)
+        energy = torch.einsum("nqhd,nkhd->nhqk", [q, k])
         attention = torch.softmax(energy / (self.embed_size ** (1 / 2)), dim=3)
-
-        out = torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(
-            N, seq_len, self.heads * self.head_dim
+        out = torch.einsum("nhql,nlhd->nqhd", [attention, v]).reshape(
+            b, seq_len, self.heads * self.head_dim
         )
         out = self.fc_out(out)
         return out
@@ -283,24 +278,23 @@ class Agent(nn.Module):
 
         self.mha = MultiHeadAttention(self.embed_dim, self.heads)
         self.fc = nn.Sequential(layer_init(nn.Linear(32, 128)), nn.ReLU())
-        self.layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
-        self.dropout = nn.Dropout(0.1)
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim, elementwise_affine=True, eps=1e-6)
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
 
     def forward(self, x):
         N = x.shape[0]
-        x = self.conv(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+        x = self.conv(x.permute((0, 3, 1, 2)))
         _, _, h, w = x.shape
         pos_enc = torch.arange(w * h).float().to(device) / (w * h)
         pos_enc = pos_enc.view(pos_enc.shape[0], 1)
         pos_enc = pos_enc.repeat(N, 1, 1)
         x = x.view(x.size(0),x.size(1), -1).transpose(1, 2)
         x = torch.cat([x, pos_enc], dim=2)
-
-        out = self.mha(x, x, x)
-        out = self.dropout(out)
-        out = self.layer_norm(out + x)
+        x = self.layer_norm1(x)
+        out = self.mha(x)
+        out = self.layer_norm2(out + x)
         out, _ = out.max(dim=1)
         out = self.fc(out)
         return out
@@ -533,6 +527,11 @@ for update in range(starting_update, num_updates + 1):
             os.makedirs(f"models/{experiment_name}")
         torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
         wandb.save(f"agent.pt")
+    print(global_step)
+    if global_step % 100 == 0:
+        if not os.path.exists(f"models/{experiment_name}"):
+            os.makedirs(f"models/{experiment_name}")
+        torch.save(agent.state_dict(), f"models/{experiment_name}/agent_{global_step}.pt")
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/grad_norm", grad_norm, global_step)

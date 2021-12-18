@@ -384,6 +384,7 @@ for update in range(starting_update, num_updates + 1):
         except Exception as e:
             e.printStackTrace()
             raise
+        rs -= np.ones_like(rs) * 0.01
         rewards[step], next_done = torch.Tensor(rs).to(device), torch.Tensor(ds).to(device)
 
         for info in infos:
