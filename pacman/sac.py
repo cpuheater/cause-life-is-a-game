@@ -318,7 +318,7 @@ def wrap_deepmind(env, episode_life=False, clip_rewards=True, frame_stack=False,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SAC with 2 Q functions, Online updates')
+    parser = argparse.ArgumentParser(description='SAC')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
