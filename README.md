@@ -13,6 +13,7 @@ An algorithm might have one or many extensions. You can determine the name of th
 * ddqn - Double DQN (https://arxiv.org/abs/1509.06461)
 
 ### List of extensions:
+* ppo_separate - separate network for the actor and the critic
 * frame_stacking - stacking four consecutive frames
 * vt - vision transformer as an encoder
 * n_step - using n step returns
