@@ -1,6 +1,9 @@
 ### Solving video games with Deep Reinforcement Learning!
 Each file is a self-contained rl algorithm, tuned to solve that particular game. 
-An algorithm might have one or many extensions. You can determine the name of the algorithm and the type of the extension from the name of the file.      
+An algorithm might have one or many extensions. You can determine the name of the algorithm and the type of the extension from the name of the file.   
+The core algorithms are based on [cleanrl](https://github.com/vwxyzjn/cleanrl) and comes with many cleanrl goodies like: tensorboard logging, videos of gameplay capturing,
+experiment management with [weights and biases](https://wandb.ai/site).
+
   
 ### List of algorithms:
 * ppo  - Proximal Policy Optimization (https://arxiv.org/abs/1707.06347)    
@@ -19,9 +22,5 @@ An algorithm might have one or many extensions. You can determine the name of th
 * n_step - using n step returns
 * relational - relational deep reinforcement learning (https://arxiv.org/abs/1806.01830)
 * sil - self imitation learning (https://arxiv.org/abs/1806.05635)  
-* icm - 
+* icm - curiosity driven exploration (https://arxiv.org/pdf/1705.05363.pdf)
 
-
-The core algorithms are based on [cleanrl](https://github.com/vwxyzjn/cleanrl) and comes with many 
-cleanrl goodies like: tensorboard logging, videos of gameplay capturing, experiment 
-management with [weights and biases](https://wandb.ai/site). 
