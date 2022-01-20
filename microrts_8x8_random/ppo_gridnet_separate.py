@@ -214,7 +214,6 @@ class CategoricalMasked(Categorical):
         p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
         return -p_log_p.sum(-1)
 
-
 class Scale(nn.Module):
     def __init__(self, scale):
         super().__init__()
@@ -222,7 +221,6 @@ class Scale(nn.Module):
 
     def forward(self, x):
         return x * self.scale
-
 
 class Transpose(nn.Module):
     def __init__(self, permutation):
@@ -238,6 +236,42 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class Critic(nn.Module):
+    def __init__(self, mapsize=8 * 8):
+        super(Critic, self).__init__()
+        self.mapsize = mapsize
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(), )
+        self.critic = layer_init(nn.Linear(128, 1), std=1)
+
+    def forward(self, x):
+        x = self.network(x.permute((0, 3, 1, 2)))
+        return self.critic(x)
+
+class Actor(nn.Module):
+    def __init__(self, mapsize=8 * 8):
+        super(Actor, self).__init__()
+        self.mapsize = mapsize
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(), )
+        self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
+
+    def forward(self, x):
+        x = self.network(x.permute((0, 3, 1, 2)))
+        return self.actor(x)
+
 
 class Agent(nn.Module):
     def __init__(self, mapsize=8 * 8):
@@ -251,14 +285,11 @@ class Agent(nn.Module):
             nn.Flatten(),
             layer_init(nn.Linear(128, 128)),
             nn.ReLU(), )
-        self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
-        self.critic = layer_init(nn.Linear(128, 1), std=1)
-
-    def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+        self.actor = Actor()
+        self.critic = Critic()
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
-        logits = self.actor(self.forward(x))
+        logits = self.actor(x)
         grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
         split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
 
@@ -287,7 +318,7 @@ class Agent(nn.Module):
         return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
 
     def get_value(self, x):
-        return self.critic(self.forward(x))
+        return self.critic(x)
 
 
 agent = Agent().to(device)
@@ -475,7 +506,8 @@ for update in range(starting_update, num_updates + 1):
 
             optimizer.zero_grad()
             loss.backward()
-            grad_norm = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.parameters()) ** 0.5
+            grad_norm_actor = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.actor.parameters()) ** 0.5
+            grad_norm_critic = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.critic.parameters()) ** 0.5
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
@@ -487,7 +519,8 @@ for update in range(starting_update, num_updates + 1):
         wandb.save(f"agent.pt")
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
-    writer.add_scalar("charts/grad_norm", grad_norm, global_step)
+    writer.add_scalar("charts/grad_norm_critic", grad_norm_critic, global_step)
+    writer.add_scalar("charts/grad_norm_actor", grad_norm_actor, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("charts/update", update, global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
