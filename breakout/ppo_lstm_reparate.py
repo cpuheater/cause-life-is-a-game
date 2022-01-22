@@ -489,10 +489,45 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """
     return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
 
-
-class Agent(nn.Module):
+class Critic(nn.Module):
     def __init__(self, envs, frames=1):
-        super(Agent, self).__init__()
+        super(Critic, self).__init__()
+        self.network = nn.Sequential(
+            Scale(1/255),
+            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(3136, args.rnn_hidden_size)),
+            nn.ReLU()
+        )
+        self.rnn = nn.LSTM(args.rnn_hidden_size, args.rnn_hidden_size, batch_first=True)
+        for name, param in self.rnn.named_parameters():
+            if 'bias' in name:
+                nn.init.constant_(param, 0)
+            elif 'weight' in name:
+                nn.init.orthogonal_(param, np.sqrt(2))
+        self.critic = layer_init(nn.Linear(args.rnn_hidden_size, 1), std=1)
+
+    def forward(self, x, rnn_state, sequence_length=1):
+        x = self.network(x)
+        if sequence_length == 1:
+            x, rnn_state = self.rnn(x.unsqueeze(1), rnn_state)
+            x = x.squeeze(1)
+        else:
+            x_shape = tuple(x.size())
+            x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
+            x, rnn_state = self.rnn(x, rnn_state)
+            x_shape = tuple(x.size())
+            x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
+        return self.critic(x), rnn_state
+
+class Actor(nn.Module):
+    def __init__(self, envs, frames=1):
+        super(Actor, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),
             layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
@@ -512,7 +547,6 @@ class Agent(nn.Module):
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
         self.actor = layer_init(nn.Linear(args.rnn_hidden_size, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(args.rnn_hidden_size, 1), std=1)
 
     def forward(self, x, rnn_state, sequence_length=1):
         x = self.network(x)
@@ -525,22 +559,28 @@ class Agent(nn.Module):
             x, rnn_state = self.rnn(x, rnn_state)
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
-        return x, rnn_state
+        return self.actor(x), rnn_state
 
-    def get_action(self, x, rnn_state, sequence_length=1, action=None):
-        x, rnn_state = self.forward(x, rnn_state, sequence_length)
-        value = self.critic(x)
-        logits = self.actor(x)
+
+class Agent(nn.Module):
+    def __init__(self, envs, frames=1):
+        super(Agent, self).__init__()
+        self.actor = Actor(envs, frames)
+        self.critic = Critic(envs, frames)
+
+    def get_action(self, x, rnn_actor_state, rnn_critic_state, sequence_length=1, action=None):
+        value, rnn_critic_state = self.critic(x, rnn_critic_state, sequence_length)
+        logits, rnn_actor_state = self.actor(x, rnn_actor_state, sequence_length)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return value, rnn_state, action, probs.log_prob(action), probs.entropy()
+        return value, rnn_actor_state, rnn_critic_state, action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x, rnn_state):
-        x, _ = self.forward(x, rnn_state)
-        return self.critic(x)
+        x, _ = self.critic(x, rnn_state)
+        return x
 
-def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states):
+def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_actor_states, rnn_critic_states):
 
     # Supply training samples
     samples = {
@@ -551,8 +591,11 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         'advantages': advantages.permute(1, 0).cpu().numpy(),
         'returns': returns.permute(1, 0).cpu().numpy(),
         'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32),
-        "hxs": rnn_hidden_states.permute(1, 0, 2).cpu().numpy(),
-        "cxs": cell_hidden_states.permute(1, 0, 2).cpu().numpy()
+        "hxs_actor": rnn_actor_states[0].permute(1, 0, 2).cpu().numpy(),
+        "cxs_actor": rnn_actor_states[1].permute(1, 0, 2).cpu().numpy(),
+        "hxs_critic": rnn_critic_states[0].permute(1, 0, 2).cpu().numpy(),
+        "cxs_critic": rnn_critic_states[1].permute(1, 0, 2).cpu().numpy(),
+
     }
 
     max_sequence_length = 1
@@ -589,7 +632,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
 
         # Stack episodes (target shape: (Episode, Step, Data ...) & apply data to the samples dict
         samples[key] = np.stack(sequences, axis=0)
-        if (key == "hxs" or key == "cxs"):
+        if (key == "hxs_actor" or key == "cxs_actor" or key == "hxs_critic" or key == "cxs_critic"):
             # Select the very first recurrent cell state of a sequence and add it to the samples
             samples[key] = samples[key][:, 0]
 
@@ -600,7 +643,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
     # Flatten all samples
     samples_flat = {}
     for key, value in samples.items():
-        if (not key == "hxs" and not key == "cxs"):
+        if (not key == "hxs_actor" and not key == "cxs_actor" and not key == "hxs_critic" and not key == "cxs_critic"):
             value = value.reshape(value.shape[0] * value.shape[1], *value.shape[2:])
         samples_flat[key] = torch.tensor(value, dtype=torch.float32, device=device)
 
@@ -623,7 +666,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         mini_batch_indices = indices[sequence_indices[start:end]].reshape(-1)
         mini_batch = {}
         for key, value in samples_flat.items():
-            if key != "hxs" and key != "cxs":
+            if (key != "hxs_actor" and key != "cxs_actor" and key != "hxs_critic" and key != "cxs_critic"):
                 mini_batch[key] = value[mini_batch_indices].to(device)
             else:
                 # Collect recurrent cell states
@@ -665,9 +708,10 @@ logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
-rnn_cell_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
-
+rnn_actor_hidden_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+rnn_actor_cell_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+rnn_critic_hidden_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+rnn_critic_cell_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
@@ -675,8 +719,10 @@ global_step = 0
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
 next_obs = envs.reset()
 next_done = torch.zeros(args.num_envs).to(device)
-rnn_hidden_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
-rnn_cell_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+rnn_actor_hidden_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+rnn_actor_cell_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+rnn_critic_hidden_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+rnn_critic_cell_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
 num_updates = args.total_timesteps // args.batch_size
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
@@ -690,12 +736,14 @@ for update in range(1, num_updates+1):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
-        rnn_hidden_states[step] = rnn_hidden_state
-        rnn_cell_states[step] = rnn_cell_state
+        rnn_actor_hidden_states[step] = rnn_actor_hidden_state
+        rnn_actor_cell_states[step] = rnn_actor_cell_state
+        rnn_critic_hidden_states[step] = rnn_critic_hidden_state
+        rnn_critic_cell_states[step] = rnn_critic_cell_state
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state))
+            value, (rnn_actor_hidden_state, rnn_actor_cell_state), (rnn_critic_hidden_state, rnn_critic_cell_state), action, logproba, _ = agent.get_action(obs[step], (rnn_actor_hidden_state, rnn_actor_cell_state), (rnn_critic_hidden_state, rnn_critic_cell_state))
 
         values[step] = value.flatten()
         actions[step] = action
@@ -705,8 +753,10 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
-        rnn_hidden_state = rnn_hidden_state * mask
-        rnn_cell_state = rnn_cell_state * mask
+        rnn_actor_hidden_state = rnn_actor_hidden_state * mask
+        rnn_actor_cell_state = rnn_actor_cell_state * mask
+        rnn_critic_hidden_state = rnn_critic_hidden_state * mask
+        rnn_critic_cell_state = rnn_critic_cell_state * mask
         indices = torch.nonzero(next_done).flatten().tolist()
         [episode_done_indices[index].append(step) for index in indices]
 
@@ -718,7 +768,7 @@ for update in range(1, num_updates+1):
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), (rnn_critic_hidden_state, rnn_critic_cell_state)).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -755,16 +805,19 @@ for update in range(1, num_updates+1):
     # Optimizaing the policy and value network
     for i_epoch_pi in range(args.update_epochs):
         data_generator = recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns,
-                                             rnn_hidden_states, rnn_cell_states)
+                                             (rnn_actor_hidden_states, rnn_actor_cell_states), (rnn_critic_hidden_states, rnn_critic_cell_states))
         for batch in data_generator:
-            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
+            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_actor_hidden_states, \
+            b_rnn_actor_cell_states, b_rnn_critic_hidden_states, b_rnn_critic_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
                                                                                                                                    batch['values'], batch['returns'], \
                                                                                                                                    batch['log_probs'], batch['advantages'], \
-                                                                                                                                   batch["hxs"], batch["cxs"], batch["loss_mask"]
+                                                                                                                                   batch["hxs_actor"], batch["cxs_actor"], \
+                                                                                                                                   batch["hxs_critic"], batch["cxs_critic"], batch["loss_mask"]
             if args.norm_adv:
                 mb_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
+            newvalues, _,_,  _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_actor_hidden_states.unsqueeze(0), b_rnn_actor_cell_states.unsqueeze(0)),
+                                                                     (b_rnn_critic_hidden_states.unsqueeze(0), b_rnn_critic_cell_states.unsqueeze(0)),
                                                                      sequence_length=args.seq_length, action=b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 
