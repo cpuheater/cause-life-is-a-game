@@ -50,7 +50,7 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-bot-envs', type=int, default=24,
+    parser.add_argument('--num-bot-envs', type=int, default=10,
                         help='the number of bot game environment; 16 bot envs measn 16 games')
     parser.add_argument('--num-selfplay-envs', type=int, default=0,
                         help='the number of self play envs; 16 self play envs means 8 games')
@@ -180,7 +180,7 @@ envs = MicroRTSGridModeVecEnv(
     max_steps=2000,
     render_theme=2,
     ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
-    map_path="maps/8x8/basesWorkers8x8.xml",
+    map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
@@ -243,22 +243,42 @@ class Agent(nn.Module):
     def __init__(self, mapsize=8 * 8):
         super(Agent, self).__init__()
         self.mapsize = mapsize
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+        h, w, c = envs.observation_space.shape
+        self.encoder = nn.Sequential(
+            Transpose((0, 3, 1, 2)),
+            layer_init(nn.Conv2d(c, 32, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
             nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU(), )
-        self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
-        self.critic = layer_init(nn.Linear(128, 1), std=1)
+            layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
+        )
 
-    def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+        self.actor = nn.Sequential(
+            layer_init(nn.ConvTranspose2d(64, 128, 3, stride=2, padding=1, output_padding=1)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=0)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=0)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(32, 78, 3, stride=2, padding=1, output_padding=0)),
+            Transpose((0, 2, 3, 1)),
+        )
+        self.critic = nn.Sequential(
+            nn.Flatten(),
+            layer_init(nn.Linear(64, 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, 1), std=1),
+        )
 
     def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
-        logits = self.actor(self.forward(x))
+        hidden = self.encoder(x)
+        logits = self.actor(hidden)
         grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
         split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
 
@@ -287,7 +307,7 @@ class Agent(nn.Module):
         return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
 
     def get_value(self, x):
-        return self.critic(self.forward(x))
+        return self.critic(self.encoder(x))
 
 
 agent = Agent().to(device)
