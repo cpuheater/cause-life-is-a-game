@@ -265,7 +265,7 @@ for global_step in range(1, args.total_timesteps+1):
     else:
         action, _ = pg.get_action([obs], device)
     # TRY NOT TO MODIFY: execute the game and log data.
-    next_obs, reward, done, _ = env.step(5 if action == 4 else action)
+    next_obs, reward, done, _ = env.step(action)
     #print(f"reward {reward} action {action}")
     reward = np.sign(reward)
     rb.put((obs, action, reward, next_obs, done))
