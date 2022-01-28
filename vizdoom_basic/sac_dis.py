@@ -1,5 +1,3 @@
-# https://github.com/pranz24/pytorch-soft-actor-critic
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,16 +9,11 @@ from gym import spaces
 import argparse
 from distutils.util import strtobool
 import collections
-import numpy as np
-import gym
-from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
-from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
+from gym.wrappers import Monitor
+from gym.spaces import Discrete, Box
 import time
 import random
 import os
-from collections import deque
-import cv2
 from gym_minigrid.wrappers import *
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
@@ -128,8 +121,6 @@ if __name__ == "__main__":
                         help='the discount factor gamma')
     parser.add_argument('--target-network-frequency', type=int, default=2, # Denis Yarats' implementation delays this by 2.
                         help="the timesteps it takes to update the target network")
-    parser.add_argument('--max-grad-norm', type=float, default=0.5,
-                        help='the maximum norm for the gradient clipping')
     parser.add_argument('--batch-size', type=int, default=64, # Worked better in my experiments, still have to do ablation on this. Please remind me
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--tau', type=float, default=0.005,
@@ -186,8 +177,6 @@ if args.capture_video:
     env = Monitor(env, f'videos/{experiment_name}')
 
 # ALGO LOGIC: initialize agent here:
-LOG_STD_MAX = 2
-LOG_STD_MIN = -5
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)

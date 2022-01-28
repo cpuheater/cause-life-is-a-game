@@ -1,31 +1,95 @@
-# https://github.com/pranz24/pytorch-soft-actor-critic
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
-from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-
 import argparse
 from distutils.util import strtobool
 import collections
 import numpy as np
 import gym
+from gym.spaces import Discrete, Box
 from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
-from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
+import skimage.transform
+
+
+class ViZDoomEnv:
+    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
+        # assign observation space
+        channel_num = 3
+
+        self.observation_shape = (channel_num, 64, 112)
+        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
+        self.reward_scale = reward_scale
+        game = DoomGame()
+
+        game.load_config(f"./scenarios/{game_config}.cfg")
+        game.set_screen_resolution(ScreenResolution.RES_160X120)
+        game.set_screen_format(ScreenFormat.CRCGCB)
+
+        num_buttons = game.get_available_buttons_size()
+        self.action_space = Discrete(num_buttons)
+        actions = [([False] * num_buttons) for i in range(num_buttons)]
+        for i in range(num_buttons):
+            actions[i][i] = True
+        self.actions = actions
+        self.frame_skip = frame_skip
+
+        game.set_seed(seed)
+        game.set_window_visible(render)
+        game.init()
+
+        self.game = game
+
+    def get_current_input(self):
+        state = self.game.get_state()
+        res_source = []
+        res_source.append(state.screen_buffer)
+        res = np.vstack(res_source)
+        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
+        self.last_input = res
+        return res
+
+    def step(self, action):
+        info = {}
+        reward = self.game.make_action(self.actions[action], self.frame_skip)
+        done = self.game.is_episode_finished()
+        if done:
+            ob = self.last_input
+        else:
+            ob = self.get_current_input()
+        # reward scaling
+        reward = reward * self.reward_scale
+        self.total_reward += reward
+        self.total_length += 1
+
+        if done:
+            info['reward'] = self.total_reward
+            info['length'] = self.total_length
+
+        return ob, reward, done, info
+
+    def reset(self):
+        self.game.new_episode()
+        self.total_reward = 0
+        self.total_length = 0
+        ob = self.get_current_input()
+        return ob
+
+    def close(self):
+        self.game.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='SAC')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="CartPole-v0",
+    parser.add_argument('--gym-id', type=str, default="basic",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
@@ -57,8 +121,6 @@ if __name__ == "__main__":
                         help='the discount factor gamma')
     parser.add_argument('--target-network-frequency', type=int, default=2, # Denis Yarats' implementation delays this by 2.
                         help="the timesteps it takes to update the target network")
-    parser.add_argument('--max-grad-norm', type=float, default=0.5,
-                        help='the maximum norm for the gradient clipping')
     parser.add_argument('--batch-size', type=int, default=64, # Worked better in my experiments, still have to do ablation on this. Please remind me
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--tau', type=float, default=0.005,
@@ -71,9 +133,9 @@ if __name__ == "__main__":
 
     # Additional hyper parameters for tweaks
     ## Separating the learning rate of the policy and value commonly seen: (Original implementation, Denis Yarats)
-    parser.add_argument('--policy-lr', type=float, default=3e-4,
+    parser.add_argument('--policy-lr', type=float, default=2e-4,
                         help='the learning rate of the policy network optimizer')
-    parser.add_argument('--q-lr', type=float, default=3e-3,
+    parser.add_argument('--q-lr', type=float, default=2e-4,
                         help='the learning rate of the Q network network optimizer')
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')
@@ -84,8 +146,8 @@ if __name__ == "__main__":
                         help='weight initialization scheme for the neural networks.')
 
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    #if not args.seed:
+    args.seed = int(time.time())
 
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -100,15 +162,14 @@ if args.track:
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
-env = gym.make(args.gym_id)
+env = ViZDoomEnv(args.seed, args.gym_id, render=True, reward_scale=0.01, frame_skip=4)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-env.seed(args.seed)
 env.action_space.seed(args.seed)
 env.observation_space.seed(args.seed)
-input_shape = env.observation_space.shape[0]
+input_shape = env.observation_space.shape
 num_actions = env.action_space.n
 # respect the default timelimit
 if args.capture_video:
@@ -129,14 +190,20 @@ class Policy(nn.Module):
     def __init__(self, input_shape, num_actions):
         super(Policy, self).__init__()
         self.network = nn.Sequential(
-            nn.Linear(input_shape, 256),
+            nn.Conv2d(3, 32, 8, stride=4),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
-            nn.Linear(256, num_actions),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(2560, 512),
+            nn.ReLU(),
+            nn.Linear(in_features=512, out_features=num_actions)
         )
 
         self.apply(layer_init)
+
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
@@ -155,17 +222,20 @@ class Policy(nn.Module):
 
 
 class SoftQNetwork(nn.Module):
-    def __init__(self, input_shape, num_actions, layer_init):
+    def __init__(self, input_shape, num_actions):
         super(SoftQNetwork, self).__init__()
-
         self.network = nn.Sequential(
-            nn.Linear(input_shape, 256),
+            nn.Conv2d(3, 32, 8, stride=4),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
-            nn.Linear(256, num_actions),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(2560, 512),
+            nn.ReLU(),
+            nn.Linear(in_features=512, out_features=num_actions)
         )
-
         self.apply(layer_init)
 
     def forward(self, x, device):
@@ -199,10 +269,10 @@ class ReplayBuffer():
 
 rb = ReplayBuffer(args.buffer_size)
 pg = Policy(input_shape, num_actions).to(device)
-qf1 = SoftQNetwork(input_shape, num_actions, layer_init).to(device)
-qf2 = SoftQNetwork(input_shape, num_actions, layer_init).to(device)
-qf1_target = SoftQNetwork(input_shape, num_actions, layer_init).to(device)
-qf2_target = SoftQNetwork(input_shape, num_actions, layer_init).to(device)
+qf1 = SoftQNetwork(input_shape, num_actions).to(device)
+qf2 = SoftQNetwork(input_shape, num_actions).to(device)
+qf1_target = SoftQNetwork(input_shape, num_actions).to(device)
+qf2_target = SoftQNetwork(input_shape, num_actions).to(device)
 qf1_target.load_state_dict(qf1.state_dict())
 qf2_target.load_state_dict(qf2.state_dict())
 values_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
@@ -232,6 +302,7 @@ for global_step in range(1, args.total_timesteps+1):
 
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, _ = env.step(action)
+    reward = 100 if reward > 0 else reward
     rb.put((obs, action, reward, next_obs, done))
     episode_reward += reward
     episode_length += 1
