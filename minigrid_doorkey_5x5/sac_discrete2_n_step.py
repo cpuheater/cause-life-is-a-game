@@ -13,6 +13,7 @@ import time
 import random
 import os
 from gym_minigrid.wrappers import *
+from collections import deque
 
 class ImageToPyTorch(gym.ObservationWrapper):
     """
@@ -104,7 +105,7 @@ if __name__ == "__main__":
                         help='the discount factor gamma')
     parser.add_argument('--target-network-frequency', type=int, default=2, # Denis Yarats' implementation delays this by 2.
                         help="the timesteps it takes to update the target network")
-    parser.add_argument('--batch-size', type=int, default=128, # Worked better in my experiments, still have to do ablation on this. Please remind me
+    parser.add_argument('--batch-size', type=int, default=64, # Worked better in my experiments, still have to do ablation on this. Please remind me
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--tau', type=float, default=0.005,
                         help="target smoothing coefficient (default: 0.005)")
@@ -112,13 +113,15 @@ if __name__ == "__main__":
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=2e2,
                         help="timestep to start learning")
+    parser.add_argument('--n-step', type=int, default=10,
+                        help="n step")
 
 
     # Additional hyper parameters for tweaks
     ## Separating the learning rate of the policy and value commonly seen: (Original implementation, Denis Yarats)
-    parser.add_argument('--policy-lr', type=float, default=1e-4,
+    parser.add_argument('--policy-lr', type=float, default=2e-4,
                         help='the learning rate of the policy network optimizer')
-    parser.add_argument('--q-lr', type=float, default=1e-4,
+    parser.add_argument('--q-lr', type=float, default=2e-4,
                         help='the learning rate of the Q network network optimizer')
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')
@@ -231,30 +234,46 @@ class SoftQNetwork(nn.Module):
         x = self.network(x)
         return x
 
-class ReplayBuffer():
-    def __init__(self, buffer_limit):
-        self.buffer = collections.deque(maxlen=buffer_limit)
+class ReplayBufferNStep(object):
+    def __init__(self, size, n_step, gamma):
+        self._storage = deque(maxlen=size)
+        self._maxsize = size
+        self.n_step_buffer = deque(maxlen=n_step)
+        self.gamma = gamma
+        self.n_step = n_step
 
-    def put(self, transition):
-        self.buffer.append(transition)
+    def __len__(self):
+        return len(self._storage)
 
-    def sample(self, n):
-        mini_batch = random.sample(self.buffer, n)
-        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
+    def get_n_step(self):
+        _, _, reward, next_observation, done = self.n_step_buffer[-1]
+        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
+            reward = self.gamma * reward * (1 - do) + r
+            mext_observation, done = (next_obs, do) if do else (next_observation, done)
+        return reward, next_observation, done
 
-        for transition in mini_batch:
-            s, a, r, s_prime, done_mask = transition
-            s_lst.append(s)
-            a_lst.append(a)
-            r_lst.append(r)
-            s_prime_lst.append(s_prime)
-            done_mask_lst.append(done_mask)
+    def append(self, obs, action, reward, next_obs, done):
+        self.n_step_buffer.append((obs, action, reward, next_obs, done))
+        if len(self.n_step_buffer) < self.n_step:
+            return
+        reward, next_obs, done = self.get_n_step()
+        obs, action, _, _, _ = self.n_step_buffer[0]
+        self._storage.append([obs, action, reward, next_obs, done])
 
-        return np.array(s_lst), np.array(a_lst), \
-               np.array(r_lst), np.array(s_prime_lst), \
-               np.array(done_mask_lst)
+    def sample(self, batch_size):
+        idxes = np.random.choice(len(self._storage), batch_size, replace=True)
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, reward, obs_tp1, done = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1, copy=False))
+            dones.append(done)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
-rb = ReplayBuffer(args.buffer_size)
+rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
 pg = Policy(input_shape, num_actions).to(device)
 qf1 = SoftQNetwork(input_shape, num_actions, layer_init).to(device)
 qf2 = SoftQNetwork(input_shape, num_actions, layer_init).to(device)
@@ -290,13 +309,13 @@ for global_step in range(1, args.total_timesteps+1):
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, _ = env.step(5 if action == 4 else action)
     reward = 100 if reward > 0 else reward
-    rb.put((obs, action, reward, next_obs, done))
+    rb.append(obs, action, reward, next_obs, done)
     episode_reward += reward
     episode_length += 1
     obs = np.array(next_obs)
 
     # ALGO LOGIC: training.
-    if len(rb.buffer) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
+    if len(rb) > args.batch_size and global_step % 4 == 0: # starts update as soon as there is enough data.
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
             next_state_probs, next_state_log_probs = pg.forward(s_next_obses, device)
@@ -348,7 +367,7 @@ for global_step in range(1, args.total_timesteps+1):
             for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
                 target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
-    if len(rb.buffer) > args.learning_starts and global_step % 100 == 0:
+    if len(rb) > args.learning_starts and global_step % 100 == 0:
         writer.add_scalar("losses/soft_q_value_1_loss", qf1_loss.item(), global_step)
         writer.add_scalar("losses/soft_q_value_2_loss", qf2_loss.item(), global_step)
         writer.add_scalar("losses/qf_loss", qf_loss.item(), global_step)
