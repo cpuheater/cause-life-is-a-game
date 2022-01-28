@@ -140,7 +140,7 @@ if __name__ == "__main__":
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')
     # NN Parameterization
-    parser.add_argument('--weights-init', default='xavier', const='xavier', nargs='?', choices=['xavier', "orthogonal", 'uniform'],
+    parser.add_argument('--weights-init', default='xavier', const='orthogonal', nargs='?', choices=['xavier', "orthogonal", 'uniform'],
                         help='weight initialization scheme for the neural networks.')
     parser.add_argument('--bias-init', default='zeros', const='xavier', nargs='?', choices=['zeros', 'uniform'],
                         help='weight initialization scheme for the neural networks.')
@@ -177,7 +177,7 @@ if args.capture_video:
 
 # ALGO LOGIC: initialize agent here:
 
-def layer_init(layer, weight_gain=1, bias_const=0):
+def layer_init(layer, weight_gain=np.sqrt(2), bias_const=0):
     if isinstance(layer, nn.Linear):
         if args.weights_init == "xavier":
             torch.nn.init.xavier_uniform_(layer.weight, gain=weight_gain)
@@ -207,6 +207,7 @@ class Policy(nn.Module):
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
+        x = x / 255.0
         logits = self.network(x)
         probs = F.softmax(logits, -1)
         z = probs == 0
@@ -240,6 +241,7 @@ class SoftQNetwork(nn.Module):
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
+        x = x / 255.0
         x = self.network(x)
         return x
 
