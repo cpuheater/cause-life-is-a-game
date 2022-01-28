@@ -5,28 +5,16 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
-from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-from gym import spaces
 import argparse
 from distutils.util import strtobool
-import collections
-import numpy as np
-import gym
 from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
-from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
+from gym.spaces import Discrete
 import time
 import random
 import os
 from collections import deque
-import cv2
 from gym_minigrid.wrappers import *
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-import skimage.transform
-import imageio
-from IPython.display import Video
-from collections import Counter
 
 class ImageToPyTorch(gym.ObservationWrapper):
     """

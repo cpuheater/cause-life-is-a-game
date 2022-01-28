@@ -1,78 +1,31 @@
+# https://github.com/pranz24/pytorch-soft-actor-critic
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
+from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
+
 import argparse
 from distutils.util import strtobool
 import collections
+import numpy as np
+import gym
 from gym.wrappers import TimeLimit, Monitor
-from gym.spaces import Discrete
+import pybullet_envs
+from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
-from gym_minigrid.wrappers import *
-
-class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
-
-    def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.uint8,
-        )
-
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
-
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
-
-class WrapFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84):
-        super().__init__(env)
-        self.observation_space = env.observation_space.spaces['image']
-        self.action_space = Discrete(5)
-
-    def observation(self, obs):
-        return obs
-
-class InfoWrapper(gym.Wrapper):
-    def __init__(self, env):
-        gym.Wrapper.__init__(self, env)
-        self._rewards = []
-
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        self._rewards = []
-        return obs["image"]
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self._rewards.append(reward)
-        vis_obs = obs["image"]
-
-        if done:
-            #print(f"rewards: {sum(self._rewards)}")
-            info = {"reward": sum(self._rewards),
-                    "length": len(self._rewards)}
-
-        return vis_obs, reward, done, info
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='SAC')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
+    parser.add_argument('--gym-id', type=str, default="CartPole-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
@@ -98,7 +51,7 @@ if __name__ == "__main__":
                         help='automatic tuning of the entropy coefficient.')
 
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=100000,
+    parser.add_argument('--buffer-size', type=int, default=135000,
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -118,9 +71,9 @@ if __name__ == "__main__":
 
     # Additional hyper parameters for tweaks
     ## Separating the learning rate of the policy and value commonly seen: (Original implementation, Denis Yarats)
-    parser.add_argument('--policy-lr', type=float, default=2e-4,
+    parser.add_argument('--policy-lr', type=float, default=3e-4,
                         help='the learning rate of the policy network optimizer')
-    parser.add_argument('--q-lr', type=float, default=2e-4,
+    parser.add_argument('--q-lr', type=float, default=3e-3,
                         help='the learning rate of the Q network network optimizer')
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')
@@ -148,9 +101,6 @@ if args.track:
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 env = gym.make(args.gym_id)
-env = InfoWrapper(env)
-env = WrapFrame(env)
-env = wrap_pytorch(env)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -158,7 +108,7 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 env.seed(args.seed)
 env.action_space.seed(args.seed)
 env.observation_space.seed(args.seed)
-input_shape = env.observation_space.shape
+input_shape = env.observation_space.shape[0]
 num_actions = env.action_space.n
 # respect the default timelimit
 if args.capture_video:
@@ -178,19 +128,12 @@ def layer_init(layer, weight_gain=1, bias_const=0):
 class Policy(nn.Module):
     def __init__(self, input_shape, num_actions):
         super(Policy, self).__init__()
-        self.input_shape = input_shape
-        self.num_actions = num_actions
-
-        c, w, h = self.input_shape
         self.network = nn.Sequential(
-            nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0),
+            nn.Linear(input_shape, 256),
             nn.ReLU(),
-            nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0),
+            nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(in_features=980, out_features=124),
-            nn.ReLU(),
-            nn.Linear(in_features=124, out_features=self.num_actions)
+            nn.Linear(256, num_actions),
         )
 
         self.apply(layer_init)
@@ -214,16 +157,13 @@ class Policy(nn.Module):
 class SoftQNetwork(nn.Module):
     def __init__(self, input_shape, num_actions, layer_init):
         super(SoftQNetwork, self).__init__()
-        c, w, h = input_shape
+
         self.network = nn.Sequential(
-            nn.Conv2d(in_channels=c, out_channels=16, kernel_size=(1, 1), padding=0),
+            nn.Linear(input_shape, 256),
             nn.ReLU(),
-            nn.Conv2d(in_channels=16, out_channels=20, kernel_size=1, padding=0),
+            nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(in_features=980, out_features=124),
-            nn.ReLU(),
-            nn.Linear(in_features=124, out_features=num_actions)
+            nn.Linear(256, num_actions),
         )
 
         self.apply(layer_init)
@@ -233,6 +173,7 @@ class SoftQNetwork(nn.Module):
         x = self.network(x)
         return x
 
+# modified from https://github.com/seungeunrho/minimalRL/blob/master/dqn.py#
 class ReplayBuffer():
     def __init__(self, buffer_limit):
         self.buffer = collections.deque(maxlen=buffer_limit)
@@ -290,8 +231,7 @@ for global_step in range(1, args.total_timesteps+1):
         action = pg.get_action([obs], device)
 
     # TRY NOT TO MODIFY: execute the game and log data.
-    next_obs, reward, done, _ = env.step(5 if action == 4 else action)
-    reward = 100 if reward > 0 else reward
+    next_obs, reward, done, _ = env.step(action)
     rb.put((obs, action, reward, next_obs, done))
     episode_reward += reward
     episode_length += 1
@@ -364,7 +304,7 @@ for global_step in range(1, args.total_timesteps+1):
         writer.add_scalar("charts/episodic_return", episode_reward, global_step)
         writer.add_scalar("charts/episode_length", episode_length, global_step)
         # Terminal verbosity
-        if global_episode % 1 == 0:
+        if global_episode % 10 == 0:
             print(f"global_step={global_step}, episode_reward={episode_reward}")
 
         # Reseting what need to be
