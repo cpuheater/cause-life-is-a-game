@@ -57,6 +57,8 @@ if __name__ == "__main__":
                         help='the discount factor gamma')
     parser.add_argument('--target-network-frequency', type=int, default=2, # Denis Yarats' implementation delays this by 2.
                         help="the timesteps it takes to update the target network")
+    parser.add_argument('--max-grad-norm', type=float, default=0.5,
+                        help='the maximum norm for the gradient clipping')
     parser.add_argument('--batch-size', type=int, default=64, # Worked better in my experiments, still have to do ablation on this. Please remind me
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--tau', type=float, default=0.005,
@@ -69,9 +71,9 @@ if __name__ == "__main__":
 
     # Additional hyper parameters for tweaks
     ## Separating the learning rate of the policy and value commonly seen: (Original implementation, Denis Yarats)
-    parser.add_argument('--policy-lr', type=float, default=1e-4,
+    parser.add_argument('--policy-lr', type=float, default=3e-4,
                         help='the learning rate of the policy network optimizer')
-    parser.add_argument('--q-lr', type=float, default=1e-3,
+    parser.add_argument('--q-lr', type=float, default=3e-3,
                         help='the learning rate of the Q network network optimizer')
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')
