@@ -26,7 +26,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
+    parser.add_argument('--gym-id', type=str, default="Microrts10-randomBiasedAI",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -186,7 +186,7 @@ envs = MicroRTSGridModeVecEnv(
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
 if args.capture_video:
-        envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
+    envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x: x % 10000000 == 0, video_length=2000)
 # if args.prod_mode:
 #     envs = VecPyTorch(
@@ -198,22 +198,9 @@ assert isinstance(envs.action_space, MultiDiscrete), "only MultiDiscrete action 
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
-    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
-        self.masks = masks
-        if len(self.masks) == 0:
-            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-        else:
-            self.masks = masks.bool()
-            logits = torch.where(self.masks, logits, torch.tensor(-1e+8, device=device))
-            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-
-    def entropy(self):
-        if len(self.masks) == 0:
-            return super(CategoricalMasked, self).entropy()
-        p_log_p = self.logits * self.probs
-        p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
-        return -p_log_p.sum(-1)
-
+    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], mask_value=None):
+        logits = torch.where(masks.bool(), logits, mask_value)
+        super(CategoricalMasked, self).__init__(probs, logits, validate_args)
 
 class Scale(nn.Module):
     def __init__(self, scale):
@@ -222,7 +209,6 @@ class Scale(nn.Module):
 
     def forward(self, x):
         return x * self.scale
-
 
 class Transpose(nn.Module):
     def __init__(self, permutation):
@@ -251,40 +237,42 @@ class Agent(nn.Module):
             nn.Flatten(),
             layer_init(nn.Linear(128, 128)),
             nn.ReLU(), )
-        self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_space.nvec[1:].sum()), std=0.01)
+        self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_plane_space.nvec.sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
+        self.register_buffer("mask_value", torch.tensor(-1e8))
 
     def forward(self, x):
         return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
 
-    def get_action(self, x, action=None, invalid_action_masks=None, envs=None):
-        logits = self.actor(self.forward(x))
-        grid_logits = logits.view(-1, envs.action_space.nvec[1:].sum())
-        split_logits = torch.split(grid_logits, envs.action_space.nvec[1:].tolist(), dim=1)
+    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None):
+        hidden = self.forward(x)
+        logits = self.actor(hidden)
+        grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
+        split_logits = torch.split(grid_logits, envs.action_plane_space.nvec.tolist(), dim=1)
 
         if action is None:
-            invalid_action_masks = torch.tensor(np.array(envs.vec_client.getMasks(0))).to(device)
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
-                                                     dim=1)
-            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
-                                  zip(split_logits, split_invalid_action_masks)]
+            split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
+            multi_categoricals = [
+                CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
+                for (logits, iam) in zip(split_logits, split_invalid_action_masks)
+            ]
             action = torch.stack([categorical.sample() for categorical in multi_categoricals])
         else:
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
             action = action.view(-1, action.shape[-1]).T
-            split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
-                                                     dim=1)
-            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
-                                  zip(split_logits, split_invalid_action_masks)]
+            split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
+            multi_categoricals = [
+                CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
+                for (logits, iam) in zip(split_logits, split_invalid_action_masks)
+            ]
         logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
         entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
-        num_predicted_parameters = len(envs.action_space.nvec) - 1
-        logprob = logprob.T.view(-1, 64, num_predicted_parameters)
-        entropy = entropy.T.view(-1, 64, num_predicted_parameters)
-        action = action.T.view(-1, 64, num_predicted_parameters)
-        invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
-        return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks
+        num_predicted_parameters = len(envs.action_plane_space.nvec)
+        logprob = logprob.T.view(-1, self.mapsize, num_predicted_parameters)
+        entropy = entropy.T.view(-1, self.mapsize, num_predicted_parameters)
+        action = action.T.view(-1, self.mapsize, num_predicted_parameters)
+        return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks, self.critic(hidden)
 
     def get_value(self, x):
         return self.critic(self.forward(x))
@@ -348,43 +336,19 @@ for update in range(starting_update, num_updates + 1):
         dones[step] = next_done
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            values[step] = agent.get_value(obs[step]).flatten()
-            action, logproba, _, invalid_action_masks[step] = agent.get_action(obs[step], envs=envs)
-
+            invalid_action_masks[step] = torch.tensor(np.array(envs.get_action_mask())).to(device)
+            action, logproba, _, _, vs = agent.get_action_and_value(
+                next_obs, envs=envs, invalid_action_masks=invalid_action_masks[step]
+            )
+            values[step] = vs.flatten()
         actions[step] = action
         logprobs[step] = logproba
-
-        # TRY NOT TO MODIFY: execute the game and log data.
-        # the real action adds the source units
-        real_action = torch.cat([
-            torch.stack(
-                [torch.arange(0, mapsize, device=device) for i in range(envs.num_envs)
-                 ]).unsqueeze(2), action], 2)
-
-        # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
-        # so as to predict an action for each cell in the map; this obviously include a
-        # lot of invalid actions at cells for which no source units exist, so the rest of
-        # the code removes these invalid actions to speed things up
-        real_action = real_action.cpu().numpy()
-        valid_actions = real_action[invalid_action_masks[step][:, :, 0].bool().cpu().numpy()]
-        valid_actions_counts = invalid_action_masks[step][:, :, 0].sum(1).long().cpu().numpy()
-        java_valid_actions = []
-        valid_action_idx = 0
-        for env_idx, valid_action_count in enumerate(valid_actions_counts):
-            java_valid_action = []
-            for c in range(valid_action_count):
-                java_valid_action += [JArray(JInt)(valid_actions[valid_action_idx])]
-                valid_action_idx += 1
-            java_valid_actions += [JArray(JArray(JInt))(java_valid_action)]
-        java_valid_actions = JArray(JArray(JArray(JInt)))(java_valid_actions)
-
         try:
-            next_obs, rs, ds, infos = envs.step(java_valid_actions)
+            next_obs, rs, ds, infos = envs.step(action.cpu().numpy().reshape(envs.num_envs, -1))
             next_obs = torch.Tensor(next_obs).to(device)
         except Exception as e:
             e.printStackTrace()
             raise
-        rs -= np.ones_like(rs) * 0.01
         rewards[step], next_done = torch.Tensor(rs).to(device), torch.Tensor(ds).to(device)
 
         for info in infos:
@@ -444,7 +408,7 @@ for update in range(starting_update, num_updates + 1):
             if args.norm_adv:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
             # raise
-            _, newlogproba, entropy, _ = agent.get_action(
+            _, newlogproba, entropy, _, new_values = agent.get_action_and_value(
                 b_obs[minibatch_ind],
                 b_actions.long()[minibatch_ind],
                 b_invalid_action_masks[minibatch_ind],
@@ -461,7 +425,7 @@ for update in range(starting_update, num_updates + 1):
             entropy_loss = entropy.mean()
 
             # Value loss
-            new_values = agent.get_value(b_obs[minibatch_ind]).view(-1)
+            new_values = new_values.view(-1)
             if args.clip_vloss:
                 v_loss_unclipped = ((new_values - b_returns[minibatch_ind]) ** 2)
                 v_clipped = b_values[minibatch_ind] + torch.clamp(new_values - b_values[minibatch_ind], -args.clip_coef,
