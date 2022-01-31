@@ -180,7 +180,7 @@ envs = MicroRTSGridModeVecEnv(
     max_steps=2000,
     render_theme=2,
     ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
-    map_path="maps/8x8/basesWorkers8x8.xml",
+    map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
@@ -298,8 +298,8 @@ if args.anneal_lr:
 
 # ALGO Logic: Storage for epoch data
 mapsize = 8 * 8
-action_space_shape = (mapsize, envs.action_space.shape[0] - 1)
-invalid_action_shape = (mapsize, envs.action_space.nvec[1:].sum() + 1)
+action_space_shape = (mapsize, len(envs.action_plane_space.nvec))
+invalid_action_shape = (mapsize, envs.action_plane_space.nvec.sum())
 
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
 actions = torch.zeros((args.num_steps, args.num_envs) + action_space_shape).to(device)
