@@ -5,18 +5,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
-from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-from gym import spaces
 import argparse
-from distutils.util import strtobool
-import numpy as np
-import gym
-from gym.wrappers import TimeLimit, Monitor
-from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
-import time
-import random
-import os
 from collections import deque
 from distutils.util import strtobool
 import numpy as np
@@ -129,7 +119,7 @@ if __name__ == "__main__":
                         help="the timesteps it takes to update the target network")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--batch-size', type=int, default=64, # Worked better in my experiments, still have to do ablation on this. Please remind me
+    parser.add_argument('--batch-size', type=int, default=512, # Worked better in my experiments, still have to do ablation on this. Please remind me
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--tau', type=float, default=0.005,
                         help="target smoothing coefficient (default: 0.005)")
@@ -147,9 +137,9 @@ if __name__ == "__main__":
 
     # Additional hyper parameters for tweaks
     ## Separating the learning rate of the policy and value commonly seen: (Original implementation, Denis Yarats)
-    parser.add_argument('--policy-lr', type=float, default=2e-4,
+    parser.add_argument('--policy-lr', type=float, default=1e-4,
                         help='the learning rate of the policy network optimizer')
-    parser.add_argument('--q-lr', type=float, default=2e-4,
+    parser.add_argument('--q-lr', type=float, default=1e-4,
                         help='the learning rate of the Q network network optimizer')
     parser.add_argument('--policy-frequency', type=int, default=1,
                         help='delays the update of the actor, as per the TD3 paper.')
@@ -203,21 +193,9 @@ if args.capture_video:
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
-    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
-        self.masks = masks
-        if len(self.masks) == 0:
-            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-        else:
-            self.masks = masks.bool()
-            logits = torch.where(self.masks, logits, torch.tensor(-1e+8, device=device))
-            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-
-    def entropy(self):
-        if len(self.masks) == 0:
-            return super(CategoricalMasked, self).entropy()
-        p_log_p = self.logits * self.probs
-        p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
-        return -p_log_p.sum(-1)
+    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], mask_value=None):
+        logits = torch.where(masks.bool(), logits, mask_value)
+        super(CategoricalMasked, self).__init__(probs, logits, validate_args)
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -237,31 +215,32 @@ class Policy(nn.Module):
             layer_init(nn.Linear(128, 128)),
             nn.ReLU())
 
-        self.logits = layer_init(nn.Linear(128, self.mapsize * env.action_space.nvec[1:].sum()), std=0.01)
+        self.logits = layer_init(nn.Linear(128, mapsize * env.action_plane_space.nvec.sum()), std=0.01)
+        self.register_buffer("mask_value", torch.tensor(-1e8))
 
     def forward(self, x):
         x = torch.Tensor(x).to(device)
         x = self.network(x.permute((0, 3, 1, 2)))
         logits = self.logits(x)
-        logits_split = logits.view(-1, env.action_space.nvec[1:].sum()).split(env.action_space.nvec[1:].tolist(), dim=1)
+        logits_split = logits.view(-1, env.action_plane_space.nvec.sum()).split(env.action_plane_space.nvec.tolist(), dim=1)
         probs_split = tuple([F.softmax(ls, -1) for ls in logits_split])
         zeros = tuple([(p == 0.0).float() * 1e-8 for p in probs_split])
         log_probs_split = tuple([torch.log(p + z) for p, z in zip(probs_split, zeros)])
         return probs_split, log_probs_split
 
-    def get_action(self, x, envs=None):
+    def get_action(self, x, invalid_action_masks=None, envs=None):
         split_logits, _ = self.forward(x)
 
-        invalid_action_masks = torch.tensor(np.array(envs.vec_client.getMasks(0))).to(device)
         invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-        split_invalid_action_masks = torch.split(invalid_action_masks[:, 1:], envs.action_space.nvec[1:].tolist(),
-                                                 dim=1)
-        multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in
-                              zip(split_logits, split_invalid_action_masks)]
+        split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
+        multi_categoricals = [
+            CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
+            for (logits, iam) in zip(split_logits, split_invalid_action_masks)
+        ]
         action = torch.stack([categorical.sample() for categorical in multi_categoricals])
-        num_predicted_parameters = len(envs.action_space.nvec) - 1
-        action = action.T.view(-1, 64, num_predicted_parameters)
-        invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
+        num_predicted_parameters = len(envs.action_plane_space.nvec)
+        action = action.T.view(-1,  self.mapsize, num_predicted_parameters)
+        #invalid_action_masks = invalid_action_masks.view(-1, 64, envs.action_space.nvec[1:].sum() + 1)
         return action, invalid_action_masks
 
 
@@ -278,13 +257,14 @@ class SoftQNetwork(nn.Module):
             layer_init(nn.Linear(128, 128)),
             nn.ReLU())
 
-        self.q_value = layer_init(nn.Linear(128, mapsize * env.action_space.nvec[1:].sum()), std=1)
+        self.q_value = layer_init(nn.Linear(128, mapsize * env.action_plane_space.nvec.sum()), std=1)
 
     def forward(self, x):
         x = torch.Tensor(x).to(device)
         x = self.network(x.permute((0, 3, 1, 2)))
         x = self.q_value(x)
-        x = torch.split(x.view(-1, env.action_space.nvec[1:].sum()), env.action_space.nvec[1:].tolist(), dim=1)
+        x = x.view(-1, env.action_plane_space.nvec.sum())
+        x = torch.split(x, env.action_plane_space.nvec.tolist(), dim=1)
         return x
 
 class ReplayBufferNStep(object):
@@ -358,32 +338,11 @@ obs, done = env.reset(), False
 for global_step in range(1, args.total_timesteps+1):
     # ALGO LOGIC: put action logic here
     env.render()
-    action, invalid_action_mask = pg.get_action(obs, envs=env)
-    # TRY NOT TO MODIFY: execute the game and log data.
-    real_action = torch.cat([
-        torch.stack(
-            [torch.arange(0, mapsize, device=device) for i in range(env.num_envs)
-             ]).unsqueeze(2), action], 2)
-
-    # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
-    # so as to predict an action for each cell in the map; this obviously include a
-    # lot of invalid actions at cells for which no source units exist, so the rest of
-    # the code removes these invalid actions to speed things up
-    real_action = real_action.cpu().numpy()
-    valid_actions = real_action[invalid_action_mask[:, :, 0].bool().cpu().numpy()]
-    valid_actions_counts = invalid_action_mask[:, :, 0].sum(1).long().cpu().numpy()
-    java_valid_actions = []
-    valid_action_idx = 0
-    for env_idx, valid_action_count in enumerate(valid_actions_counts):
-        java_valid_action = []
-        for c in range(valid_action_count):
-            java_valid_action += [JArray(JInt)(valid_actions[valid_action_idx])]
-            valid_action_idx += 1
-        java_valid_actions += [JArray(JArray(JInt))(java_valid_action)]
-    java_valid_actions = JArray(JArray(JArray(JInt)))(java_valid_actions)
+    invalid_action_masks = torch.tensor(np.array(env.get_action_mask())).to(device)
+    action, invalid_action_mask = pg.get_action(obs, invalid_action_masks, envs=env)
 
     try:
-        next_obs, reward, done, infos = env.step(java_valid_actions)
+        next_obs, reward, done, infos = env.step(action.cpu().numpy())
     except Exception as e:
         e.printStackTrace()
         raise
@@ -404,13 +363,12 @@ for global_step in range(1, args.total_timesteps+1):
         s_obs, s_actions, s_rewards, s_next_obses, s_dones, invalid_action_mask = rb.sample(args.batch_size)
         with torch.no_grad():
             probs_split, next_state_log_probs_split = pg.forward(s_next_obses)
-
+            #probs_split, next_state_log_probs_split = probs_split.view(-1, mapsize, env.action_plane_space.nvec.sum()), next_state_log_probs_split.view(-1, mapsize, env.action_plane_space.nvec.sum())
             qf1_next_target_split = qf1_target.forward(s_next_obses)
             qf2_next_target_split = qf2_target.forward(s_next_obses)
             min_target = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
             #min_qf_next_target = (probs * (torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_probs)).sum(-1)
             min_next_target = tuple([(p * (m - alpha*n)).sum(-1) for p, m, n in zip(probs_split, min_target, next_state_log_probs_split)])
-
             next_q_value = torch.stack([torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * m.view(args.batch_size, -1) for m in min_next_target])
             #next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * min_next_target
 
@@ -418,6 +376,8 @@ for global_step in range(1, args.total_timesteps+1):
         qf1_a_values = qf1.forward(s_obs)
         qf2_a_values = qf2.forward(s_obs)
 
+        #qf1_a_values = torch.stack([values[np.arange(args.batch_size),  np.array(a.cpu().numpy())] for a, values in zip(s_actions, qf1_a_values)])
+        #qf2_a_values = torch.stack([values[np.arange(args.batch_size),  np.array(a)] for a, values in zip(s_actions, qf2_a_values)])
         qf1_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf1_a_values)])
         qf2_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf2_a_values)])
 
