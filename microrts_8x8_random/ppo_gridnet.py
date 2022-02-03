@@ -321,6 +321,13 @@ if args.prod_mode and wandb.run.resumed:
     agent.eval()
     print(f"resumed at update {starting_update}")
 
+
+print("Model's state_dict:")
+for param_tensor in agent.state_dict():
+    print(param_tensor, "\t", agent.state_dict()[param_tensor].size())
+total_params = sum([param.nelement() for param in agent.parameters()])
+print("Model's total parameters:", total_params)
+
 for update in range(starting_update, num_updates + 1):
     # Annealing the rate if instructed to do so.
     if args.anneal_lr:

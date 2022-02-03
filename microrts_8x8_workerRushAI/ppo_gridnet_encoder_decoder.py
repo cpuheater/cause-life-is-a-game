@@ -179,7 +179,7 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
     map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
@@ -339,6 +339,12 @@ if args.prod_mode and wandb.run.resumed:
     agent.load_state_dict(torch.load(f"models/{experiment_name}/agent.pt"))
     agent.eval()
     print(f"resumed at update {starting_update}")
+
+print("Model's state_dict:")
+for param_tensor in agent.state_dict():
+    print(param_tensor, "\t", agent.state_dict()[param_tensor].size())
+total_params = sum([param.nelement() for param in agent.parameters()])
+print("Model's total parameters:", total_params)
 
 for update in range(starting_update, num_updates + 1):
     # Annealing the rate if instructed to do so.
