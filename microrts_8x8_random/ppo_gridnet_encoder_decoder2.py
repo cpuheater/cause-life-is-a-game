@@ -229,23 +229,42 @@ class Agent(nn.Module):
     def __init__(self, mapsize=8 * 8):
         super(Agent, self).__init__()
         self.mapsize = mapsize
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+        h, w, c = envs.observation_space.shape
+        self.encoder = nn.Sequential(
+            Transpose((0, 3, 1, 2)),
+            layer_init(nn.Conv2d(c, 32, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
             nn.ReLU(),
+            layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1)),
+            nn.MaxPool2d(3, stride=2, padding=1),
+        )
+
+        self.actor = nn.Sequential(
+            layer_init(nn.ConvTranspose2d(64, 128, 3, stride=2, padding=1, output_padding=1)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=0)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=0)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(32, 78, 3, stride=2, padding=1, output_padding=0)),
+            Transpose((0, 2, 3, 1)),
+        )
+        self.critic = nn.Sequential(
             nn.Flatten(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU(), )
-        self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_plane_space.nvec.sum()), std=0.01)
-        self.critic = layer_init(nn.Linear(128, 1), std=1)
+            layer_init(nn.Linear(64, 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, 1), std=1),
+        )
         self.register_buffer("mask_value", torch.tensor(-1e8))
 
-    def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
-
     def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None):
-        hidden = self.forward(x)
+        hidden = self.encoder(x)
         logits = self.actor(hidden)
         grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
         split_logits = torch.split(grid_logits, envs.action_plane_space.nvec.tolist(), dim=1)
@@ -275,7 +294,7 @@ class Agent(nn.Module):
         return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks, self.critic(hidden)
 
     def get_value(self, x):
-        return self.critic(self.forward(x))
+        return self.critic(self.encoder(x))
 
 
 agent = Agent().to(device)
