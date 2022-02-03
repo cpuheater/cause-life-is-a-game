@@ -252,7 +252,7 @@ class Agent(nn.Module):
             nn.ReLU(),
             layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=0)),
             nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(32, 78, 3, stride=2, padding=1, output_padding=0)),
+            layer_init(nn.ConvTranspose2d(32, 78, 3, stride=2, padding=2, output_padding=1)),
             Transpose((0, 2, 3, 1)),
         )
         self.critic = nn.Sequential(
