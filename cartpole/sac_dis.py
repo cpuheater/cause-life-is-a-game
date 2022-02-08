@@ -51,7 +51,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='automatic tuning of the entropy coefficient.')
 
     # Algorithm specific arguments
@@ -67,7 +67,7 @@ if __name__ == "__main__":
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--tau', type=float, default=0.005,
                         help="target smoothing coefficient (default: 0.005)")
-    parser.add_argument('--alpha', type=float, default=0.2,
+    parser.add_argument('--alpha', type=float, default=1,
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=5e1,
                         help="timestep to start learning")
@@ -124,14 +124,10 @@ if args.capture_video:
 LOG_STD_MAX = 2
 LOG_STD_MIN = -5
 
-def layer_init(layer, weight_gain=1, bias_const=0):
-    if isinstance(layer, nn.Linear):
-        if args.weights_init == "xavier":
-            torch.nn.init.xavier_uniform_(layer.weight, gain=weight_gain)
-        elif args.weights_init == "orthogonal":
-            torch.nn.init.orthogonal_(layer.weight, gain=weight_gain)
-        if args.bias_init == "zeros":
-            torch.nn.init.constant_(layer.bias, bias_const)
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
 
 def conv_shape(input, kernel_size, stride, padding=0):
     return (input + 2 * padding - kernel_size) // stride + 1
@@ -143,21 +139,12 @@ class Policy(nn.Module):
         self.num_actions = num_actions
 
         self.network = nn.Sequential(
-            nn.Linear(4, 256),
+            layer_init(nn.Linear(4, 256)),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            layer_init(nn.Linear(256, 256)),
             nn.ReLU()
         )
-        self.logits = nn.Linear(in_features=256, out_features=self.num_actions)
-
-        for layer in self.modules():
-            if isinstance(layer, nn.Linear):
-                nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
-                layer.bias.data.zero_()
-
-        nn.init.xavier_uniform_(self.logits.weight)
-        self.logits.bias.data.zero_()
-
+        self.logits = layer_init(nn.Linear(in_features=256, out_features=self.num_actions),std=0.01)
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
@@ -183,21 +170,13 @@ class SoftQNetwork(nn.Module):
         self.n_actions = num_actions
 
         self.network = nn.Sequential(
-            nn.Linear(4, 256),
+            layer_init(nn.Linear(4, 256)),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            layer_init(nn.Linear(256, 256)),
             nn.ReLU()
         )
 
-        self.q_value = nn.Linear(in_features=256, out_features=num_actions)
-
-        for layer in self.modules():
-            if isinstance(layer, nn.Linear):
-                nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
-                layer.bias.data.zero_()
-
-        nn.init.xavier_uniform_(self.q_value.weight)
-        self.q_value.bias.data.zero_()
+        self.q_value = layer_init(nn.Linear(in_features=256, out_features=num_actions), std=1)
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)

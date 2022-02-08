@@ -21,6 +21,7 @@ import random
 import os
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
 from jpype.types import JArray, JInt
+import collections
 
 class VecMonitor(VecEnvWrapper):
     def __init__(self, venv):
@@ -123,7 +124,7 @@ if __name__ == "__main__":
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--tau', type=float, default=0.005,
                         help="target smoothing coefficient (default: 0.005)")
-    parser.add_argument('--alpha', type=float, default=0.2,
+    parser.add_argument('--alpha', type=float, default=1,
                         help="Entropy regularization coefficient.")
     parser.add_argument('--learning-starts', type=int, default=0,
                         help="timestep to start learning")
@@ -263,49 +264,36 @@ class SoftQNetwork(nn.Module):
         x = self.network(x.permute((0, 3, 1, 2)))
         x = self.q_value(x)
         x = x.view(-1, env.action_plane_space.nvec.sum())
-        #x = torch.split(x, env.action_plane_space.nvec.tolist(), dim=1)
+        x = torch.split(x, env.action_plane_space.nvec.tolist(), dim=1)
         return x
 
-class ReplayBufferNStep(object):
-    def __init__(self, size, n_step, gamma):
-        self._storage = deque(maxlen=size)
-        self._maxsize = size
-        self.n_step_buffer = deque(maxlen=n_step)
-        self.gamma = gamma
-        self.n_step = n_step
+class ReplayBuffer():
+    def __init__(self, buffer_limit):
+        self.buffer = collections.deque(maxlen=buffer_limit)
+
+    def put(self, transition):
+        self.buffer.append(transition)
 
     def __len__(self):
-        return len(self._storage)
+        return len(self.buffer)
 
-    def get_n_step(self):
-        _, _, reward, next_observation, done = self.n_step_buffer[-1]
-        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
-            reward = self.gamma * reward * (1 - do) + r
-            mext_observation, done = (next_obs, do) if do else (next_observation, done)
-        return reward, next_observation, done
+    def sample(self, n):
+        mini_batch = random.sample(self.buffer, n)
+        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
 
-    def append(self, obs, action, reward, next_obs, done):
-        self.n_step_buffer.append((obs, action, reward, next_obs, done))
-        if len(self.n_step_buffer) < self.n_step:
-            return
-        reward, next_obs, done = self.get_n_step()
-        obs, action, _, _, _ = self.n_step_buffer[0]
-        self._storage.append([obs, action, reward, next_obs, done])
+        for transition in mini_batch:
+            s, a, r, s_prime, done_mask = transition
+            s_lst.append(s)
+            a_lst.append(a)
+            r_lst.append(r)
+            s_prime_lst.append(s_prime)
+            done_mask_lst.append(done_mask)
 
-    def sample(self, batch_size):
-        idxes = np.random.choice(len(self._storage), batch_size, replace=True)
-        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
-        for i in idxes:
-            data = self._storage[i]
-            obs_t, action, reward, obs_tp1, done = data
-            obses_t.append(np.array(obs_t, copy=False))
-            actions.append(np.array(action, copy=False))
-            rewards.append(reward)
-            obses_tp1.append(np.array(obs_tp1, copy=False))
-            dones.append(done)
-        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
+        return np.array(s_lst), np.array(a_lst), \
+               np.array(r_lst), np.array(s_prime_lst), \
+               np.array(done_mask_lst)
 
-rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
+rb=ReplayBuffer(args.buffer_size)
 
 pg = Policy().to(device)
 qf1 = SoftQNetwork().to(device)
@@ -340,12 +328,12 @@ for global_step in range(1, args.total_timesteps+1):
     action = pg.get_action(obs, invalid_action_masks, envs=env)
 
     try:
-        next_obs, reward, done, infos = env.step(action.cpu().numpy())
+        next_obs, reward, done, infos = env.step(action.cpu().numpy().reshape(1, -1))
     except Exception as e:
         e.printStackTrace()
         raise
 
-    rb.append(obs.squeeze(), action.cpu().numpy().squeeze(), reward, next_obs.squeeze(), done)
+    rb.put((obs.squeeze(), action.cpu().numpy().squeeze(), reward, next_obs.squeeze(), done))
     obs = np.array(next_obs)
 
     for info in infos:
@@ -361,38 +349,20 @@ for global_step in range(1, args.total_timesteps+1):
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
             probs_split, log_probs_split = pg.forward(s_next_obses)
-            probs_split,log_probs_split = torch.cat(list(map(lambda x: x,probs_split)), dim=1), torch.cat(list(map(lambda x: x,log_probs_split)), dim=1)
             qf1_next_target_split = qf1_target.forward(s_next_obses)
             qf2_next_target_split = qf2_target.forward(s_next_obses)
-            min_target = torch.min(qf1_next_target_split, qf2_next_target_split)
-            #min_target = min_target.reshape(args.batch_size, mapsize, -1)
-            #min_qf_next_target = (probs * (torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_probs)).sum(-1)
-            min_next_target = (probs_split * (min_target - alpha * log_probs_split)).sum(-1)
-            #min_next_target = tuple([(p * (m - alpha*n)).sum(-1) for p, m, n in zip(probs_split, min_target, log_probs_split)])
-            #next_q_value = torch.stack([torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * m.view(args.batch_size, -1) for m in min_next_target])
-            min_next_target = min_next_target.view(args.batch_size, -1)
-            next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * args.gamma * min_next_target
-            #next_q_value = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * (args.gamma ** args.n_step) * min_next_target
+            min_target_split = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
+            min_next_target_split = tuple([(p * (m - alpha*n)).sum(-1) for p, m, n in zip(probs_split, min_target_split, log_probs_split)])
+            next_q_value_split = torch.stack([torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * args.gamma * m.view(args.batch_size, -1) for m in min_next_target_split])
 
-        #s_actions = torch.LongTensor(s_actions).to(device).view(-1, s_actions.shape[-1]).T
-        qf1_a_values = torch.split(qf1.forward(s_obs), env.action_plane_space.nvec.tolist(), dim=1)
-        qf2_a_values = torch.split(qf2.forward(s_obs), env.action_plane_space.nvec.tolist(), dim=1)
-        s_actions = s_actions.reshape(args.batch_size * mapsize, -1).T
-
-        qf1_a_values = torch.stack([values[np.arange(args.batch_size * mapsize), np.array(a)] for a, values in zip(s_actions, qf1_a_values)])
-        qf2_a_values = torch.stack([values[np.arange(args.batch_size * mapsize), np.array(a)] for a, values in zip(s_actions, qf2_a_values)])
-        qf1_a_values = qf1_a_values.sum(0)
-        qf2_a_values = qf2_a_values.sum(0)
-        #qf1_a_values = torch.stack([values[np.arange(args.batch_size),  np.array(a.cpu().numpy())] for a, values in zip(s_actions, qf1_a_values)])
-        #qf2_a_values = torch.stack([values[np.arange(args.batch_size),  np.array(a)] for a, values in zip(s_actions, qf2_a_values)])
-        #qf1_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf1_a_values)])
-        #qf2_a_values = torch.stack([values.gather(1, a.view(-1, 1)).view(-1) for a, values in zip(s_actions, qf2_a_values)])
-
-
-        #qf1_a_values = qf1.forward(s_obs)[np.arange(args.batch_size), np.array(s_actions)]
-        #qf2_a_values = qf2.forward(s_obs)[np.arange(args.batch_size), np.array(s_actions)]
-        qf1_loss = loss_fn(qf1_a_values, next_q_value.view(-1))
-        qf2_loss = loss_fn(qf2_a_values, next_q_value.view(-1))
+        qf1_a_values = qf1.forward(s_obs)
+        qf2_a_values = qf2.forward(s_obs)
+        dupa_s_actions = torch.LongTensor(s_actions).to(device).permute(2,0, 1)
+        dupa_qf1_a_values = torch.stack([values.view(args.batch_size, mapsize, -1).gather(2, a.unsqueeze(2)) for a, values in zip(dupa_s_actions, qf1_a_values)]).squeeze(-1).sum(0).view(-1)
+        dupa_qf2_a_values = torch.stack([values.view(args.batch_size, mapsize, -1).gather(2, a.unsqueeze(2)) for a, values in zip(dupa_s_actions, qf2_a_values)]).squeeze(-1).sum(0).view(-1)
+        next_q_value = next_q_value_split.squeeze(-1).mean(0).view(-1)
+        qf1_loss = loss_fn(dupa_qf1_a_values, next_q_value)
+        qf2_loss = loss_fn(dupa_qf2_a_values, next_q_value)
         qf_loss = (qf1_loss + qf2_loss) / 2
 
         values_optimizer.zero_grad()
@@ -406,11 +376,7 @@ for global_step in range(1, args.total_timesteps+1):
                 qf1_pi_split = qf1.forward(s_obs)
                 qf2_pi_split = qf2.forward(s_obs)
 
-                #min_qf_pi = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_pi_split, qf2_pi_split)])
-                min_qf_pi = torch.min(qf1_pi_split, qf2_pi_split)
-                min_qf_pi = torch.split(min_qf_pi, env.action_plane_space.nvec.tolist(), dim=1)
-                #min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                #policy_loss = (probs * (alpha * log_probs - min_qf_pi)).sum(-1).mean()
+                min_qf_pi = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_pi_split, qf2_pi_split)])
                 policy_loss = torch.stack([(p * (alpha * l_p - min)).sum(-1).mean() for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]).mean()
 
                 policy_optimizer.zero_grad()
