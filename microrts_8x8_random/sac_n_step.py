@@ -112,7 +112,7 @@ if __name__ == "__main__":
                         help='automatic tuning of the entropy coefficient.')
 
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=100000,
+    parser.add_argument('--buffer-size', type=int, default=70000,
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -267,33 +267,46 @@ class SoftQNetwork(nn.Module):
         x = torch.split(x, env.action_plane_space.nvec.tolist(), dim=1)
         return x
 
-class ReplayBuffer():
-    def __init__(self, buffer_limit):
-        self.buffer = collections.deque(maxlen=buffer_limit)
-
-    def put(self, transition):
-        self.buffer.append(transition)
+class ReplayBufferNStep(object):
+    def __init__(self, size, n_step, gamma):
+        self._storage = deque(maxlen=size)
+        self._maxsize = size
+        self.n_step_buffer = deque(maxlen=n_step)
+        self.gamma = gamma
+        self.n_step = n_step
 
     def __len__(self):
-        return len(self.buffer)
+        return len(self._storage)
 
-    def sample(self, n):
-        mini_batch = random.sample(self.buffer, n)
-        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
+    def get_n_step(self):
+        _, _, reward, next_observation, done = self.n_step_buffer[-1]
+        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
+            reward = self.gamma * reward * (1 - do) + r
+            mext_observation, done = (next_obs, do) if do else (next_observation, done)
+        return reward, next_observation, done
 
-        for transition in mini_batch:
-            s, a, r, s_prime, done_mask = transition
-            s_lst.append(s)
-            a_lst.append(a)
-            r_lst.append(r)
-            s_prime_lst.append(s_prime)
-            done_mask_lst.append(done_mask)
+    def append(self, obs, action, reward, next_obs, done):
+        self.n_step_buffer.append((obs, action, reward, next_obs, done))
+        if len(self.n_step_buffer) < self.n_step:
+            return
+        reward, next_obs, done = self.get_n_step()
+        obs, action, _, _, _ = self.n_step_buffer[0]
+        self._storage.append([obs, action, reward, next_obs, done])
 
-        return np.array(s_lst), np.array(a_lst), \
-               np.array(r_lst), np.array(s_prime_lst), \
-               np.array(done_mask_lst)
+    def sample(self, batch_size):
+        idxes = np.random.choice(len(self._storage), batch_size, replace=True)
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, reward, obs_tp1, done = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1, copy=False))
+            dones.append(done)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
-rb=ReplayBuffer(args.buffer_size)
+rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
 
 pg = Policy().to(device)
 qf1 = SoftQNetwork().to(device)
@@ -333,7 +346,7 @@ for global_step in range(1, args.total_timesteps+1):
         e.printStackTrace()
         raise
 
-    rb.put((obs.squeeze(), action.cpu().numpy().squeeze(), reward, next_obs.squeeze(), done))
+    rb.append(obs.squeeze(), action.cpu().numpy().squeeze(), reward, next_obs.squeeze(), done)
     obs = np.array(next_obs)
 
     for info in infos:
@@ -353,14 +366,14 @@ for global_step in range(1, args.total_timesteps+1):
             qf2_next_target_split = qf2_target.forward(s_next_obses)
             min_target_split = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_next_target_split, qf2_next_target_split)])
             min_next_target_split = tuple([(p * (m - alpha*n)).sum(-1) for p, m, n in zip(probs_split, min_target_split, log_probs_split)])
-            next_q_value_split = torch.stack([torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * args.gamma * m.view(args.batch_size, -1) for m in min_next_target_split])
+            next_q_value_split = torch.stack([torch.Tensor(s_rewards).to(device).squeeze(1) + (1 - torch.Tensor(s_dones).to(device).squeeze(1)) * (args.gamma ** args.n_step) * m.view(args.batch_size, -1).mean(-1) for m in min_next_target_split])
 
         qf1_a_values = qf1.forward(s_obs)
         qf2_a_values = qf2.forward(s_obs)
         dupa_s_actions = torch.LongTensor(s_actions).to(device).permute(2,0, 1)
-        dupa_qf1_a_values = torch.stack([values.view(args.batch_size, mapsize, -1).gather(2, a.unsqueeze(2)) for a, values in zip(dupa_s_actions, qf1_a_values)]).squeeze(-1).sum(0).view(-1)
-        dupa_qf2_a_values = torch.stack([values.view(args.batch_size, mapsize, -1).gather(2, a.unsqueeze(2)) for a, values in zip(dupa_s_actions, qf2_a_values)]).squeeze(-1).sum(0).view(-1)
-        next_q_value = next_q_value_split.squeeze(-1).mean(0).view(-1)
+        dupa_qf1_a_values = torch.stack([values.view(args.batch_size, mapsize, -1).gather(2, a.unsqueeze(2)) for a, values in zip(dupa_s_actions, qf1_a_values)]).squeeze(-1).sum(0).mean(-1)
+        dupa_qf2_a_values = torch.stack([values.view(args.batch_size, mapsize, -1).gather(2, a.unsqueeze(2)) for a, values in zip(dupa_s_actions, qf2_a_values)]).squeeze(-1).sum(0).mean(-1)
+        next_q_value = next_q_value_split.mean(0)
         qf1_loss = loss_fn(dupa_qf1_a_values, next_q_value)
         qf2_loss = loss_fn(dupa_qf2_a_values, next_q_value)
         qf_loss = (qf1_loss + qf2_loss) / 2
@@ -377,7 +390,7 @@ for global_step in range(1, args.total_timesteps+1):
                 qf2_pi_split = qf2.forward(s_obs)
 
                 min_qf_pi = tuple([torch.min(qf1, qf2) for qf1, qf2 in zip(qf1_pi_split, qf2_pi_split)])
-                policy_loss = torch.stack([(p * (alpha * l_p - min)).sum(-1).mean() for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]).mean()
+                policy_loss = torch.stack([(p * (alpha * l_p - min)).view(args.batch_size, mapsize, -1).sum(-1).mean(-1) for p, l_p, min in zip(probs_split, log_probs_split, min_qf_pi)]).mean()
 
                 policy_optimizer.zero_grad()
                 policy_loss.backward()
