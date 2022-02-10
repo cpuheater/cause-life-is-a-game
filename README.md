@@ -14,6 +14,7 @@ experiment management with [weights and biases](https://wandb.ai/site).
 * dqn - Deep Q-Network (https://arxiv.org/abs/1509.06461)
 * sac - Soft Actor-Critic (https://arxiv.org/abs/1801.01290)
 * ddqn - Double DQN (https://arxiv.org/abs/1509.06461)
+* dueling_dqn - Dueling DQN (https://arxiv.org/abs/1511.06581)
 
 ### List of extensions:
 * ppo_separate - separate network for the actor and the critic

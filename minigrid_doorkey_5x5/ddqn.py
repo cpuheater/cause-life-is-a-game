@@ -84,7 +84,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--gym-id', type=str, default="MiniGrid-DoorKey-5x5-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=5e-4,
+    parser.add_argument('--learning-rate', type=float, default=7e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=2,
                         help='seed of the experiment')
@@ -110,7 +110,7 @@ if __name__ == "__main__":
                         help='the discount factor gamma')
     parser.add_argument('--target-network-frequency', type=int, default=100,
                         help="the timesteps it takes to update the target network")
-    parser.add_argument('--max-grad-norm', type=float, default=1.0,
+    parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
     parser.add_argument('--batch-size', type=int, default=32,
                         help="the batch size of sample from the reply memory")
@@ -122,7 +122,7 @@ if __name__ == "__main__":
                         help="the fraction of `total-timesteps` it takes from start-e to go end-e")
     parser.add_argument('--learning-starts', type=int, default=80000,
                         help="timestep to start learning")
-    parser.add_argument('--train-frequency', type=int, default=4,
+    parser.add_argument('--train-frequency', type=int, default=1,
                         help="the frequency of training")
     args = parser.parse_args()
     if not args.seed:
