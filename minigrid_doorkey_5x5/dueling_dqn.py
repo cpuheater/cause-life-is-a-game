@@ -125,8 +125,8 @@ if __name__ == "__main__":
     parser.add_argument('--train-frequency', type=int, default=1,
                         help="the frequency of training")
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    #if not args.seed:
+    args.seed = int(time.time())
 
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -202,12 +202,16 @@ class QNetwork(nn.Module):
             nn.Flatten(),
             layer_init(nn.Linear(980, 256)),
             nn.ReLU(),
-            nn.Linear(256, 5)
         )
+        self.v = nn.Linear(256, 1)
+        self.a = nn.Linear(256, 5)
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
-        return self.network(x)
+        x = self.network(x)
+        v = self.v(x)
+        a = self.a(x)
+        return v + a - a.mean()
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
