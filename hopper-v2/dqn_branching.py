@@ -22,7 +22,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="CartPole-v0",
+    parser.add_argument('--gym-id', type=str, default="BipedalWalker-v3",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=7e-4,
                         help='the learning rate of the optimizer')
@@ -60,36 +60,20 @@ if __name__ == "__main__":
                         help="the ending epsilon for exploration")
     parser.add_argument('--exploration-fraction', type=float, default=0.8,
                         help="the fraction of `total-timesteps` it takes from start-e to go end-e")
-    parser.add_argument('--learning-starts', type=int, default=10000,
+    parser.add_argument('--learning-starts', type=int, default=32,
                         help="timestep to start learning")
     parser.add_argument('--train-frequency', type=int, default=1,
                         help="the frequency of training")
+    parser.add_argument('--bins', type=int, default=6,
+                        help="number of bins")
     args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
+    #if not args.seed:
+    args.seed = int(time.time())
 
 def one_hot(a, size):
     b = np.zeros((size))
     b[a] = 1
     return b
-
-class ProcessObsInputEnv(gym.ObservationWrapper):
-    """
-    This wrapper handles inputs from `Discrete` and `Box` observation space.
-    If the `env.observation_space` is of `Discrete` type,
-    it returns the one-hot encoding of the state
-    """
-    def __init__(self, env):
-        super().__init__(env)
-        self.n = None
-        if isinstance(self.env.observation_space, Discrete):
-            self.n = self.env.observation_space.n
-            self.observation_space = Box(0, 1, (self.n,))
-
-    def observation(self, obs):
-        if self.n:
-            return one_hot(np.array(obs), self.n)
-        return obs
 
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -104,7 +88,7 @@ if args.track:
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
-env = ProcessObsInputEnv(gym.make(args.gym_id))
+env = gym.make(args.gym_id)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -113,7 +97,7 @@ env.seed(args.seed)
 env.action_space.seed(args.seed)
 env.observation_space.seed(args.seed)
 # respect the default timelimit
-assert isinstance(env.action_space, Discrete), "only discrete action space is supported"
+#assert isinstance(env.action_space, Continous), "only discrete action space is supported"
 if args.capture_video:
     env = Monitor(env, f'videos/{experiment_name}')
 
@@ -143,28 +127,30 @@ class ReplayBuffer():
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, bins=6):
         super(QNetwork, self).__init__()
-        self.fc1 = nn.Linear(np.array(env.observation_space.shape).prod(), 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.v = nn.Linear(84, 1)
-        self.a = nn.Linear(84, env.action_space.n)
+        self.network = nn.Sequential(nn.Linear(np.array(env.observation_space.shape).prod(), 128),
+                                     nn.ReLU(),
+                                     nn.Linear(128, 128),
+                                     nn.ReLU())
+        self.v = nn.Linear(128, 1)
+        self.a_heads = nn.ModuleList([nn.Linear(128, bins) for i in range(env.action_space.shape[0])])
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = self.network(x)
         v = self.v(x)
-        a = self.a(x)
-        return v + a - a.mean()
+        a = torch.stack([h(x) for h in self.a_heads], dim = 1)
+        q = v.unsqueeze(2) + a - a.mean(2, keepdim = True )
+        return q
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
 rb = ReplayBuffer(args.buffer_size)
-q_network = QNetwork(env).to(device)
-target_network = QNetwork(env).to(device)
+q_network = QNetwork(env, args.bins).to(device)
+target_network = QNetwork(env, args.bins).to(device)
 target_network.load_state_dict(q_network.state_dict())
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
@@ -174,14 +160,17 @@ print(q_network)
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
 episode_reward = 0
+discretized = np.linspace(-1.,1., args.bins)
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
-    if random.random() < epsilon:
-        action = env.action_space.sample()
-    else:
-        logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
-        action = torch.argmax(logits, dim=1).tolist()[0]
+    #if random.random() < epsilon:
+    #    action = env.action_space.sample()
+    #else:
+    logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
+    action = torch.argmax(logits.squeeze(0), dim=1).cpu().numpy()
+
+    action = np.array([discretized[aa] for aa in action])
 
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, _ = env.step(action)
@@ -193,8 +182,8 @@ for global_step in range(args.total_timesteps):
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
             target_max = torch.max(target_network.forward(s_next_obses, device), dim=1)[0]
-            td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
-        old_val = q_network.forward(s_obs, device).gather(1, torch.LongTensor(s_actions).view(-1, 1).to(device)).squeeze()
+            td_target = torch.Tensor(s_rewards.reshape(-1, 1)).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones.reshape(-1, 1)).to(device))
+        old_val = q_network.forward(s_obs, device).gather(2, torch.LongTensor(s_actions).to(device).unsqueeze(2)).squeeze()
         loss = loss_fn(td_target, old_val)
 
         if global_step % 100 == 0:
