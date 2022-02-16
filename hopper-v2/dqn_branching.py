@@ -22,17 +22,17 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="BipedalWalker-v3",
+    parser.add_argument('--gym-id', type=str, default="Hopper-v2",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=7e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=20000,
+    parser.add_argument('--total-timesteps', type=int, default=10000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
-    parser.add_argument('--cuda', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--cuda', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='if toggled, cuda will not be enabled by default')
     parser.add_argument('--track', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='run the script in production mode and use wandb to log outputs')
@@ -160,7 +160,8 @@ print(q_network)
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
 episode_reward = 0
-discretized = np.linspace(-1.,1., args.bins)
+bins = np.linspace(-1.,1., args.bins)
+episode = 0
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
@@ -170,10 +171,10 @@ for global_step in range(args.total_timesteps):
     logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
     action = torch.argmax(logits.squeeze(0), dim=1).cpu().numpy()
 
-    action = np.array([discretized[aa] for aa in action])
+    action_cont = np.array([bins[aa] for aa in action])
 
     # TRY NOT TO MODIFY: execute the game and log data.
-    next_obs, reward, done, _ = env.step(action)
+    next_obs, reward, done, _ = env.step(action_cont)
     episode_reward += reward
 
     # ALGO LOGIC: training.
@@ -181,10 +182,12 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
-            target_max = torch.max(target_network.forward(s_next_obses, device), dim=1)[0]
-            td_target = torch.Tensor(s_rewards.reshape(-1, 1)).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones.reshape(-1, 1)).to(device))
-        old_val = q_network.forward(s_obs, device).gather(2, torch.LongTensor(s_actions).to(device).unsqueeze(2)).squeeze()
-        loss = loss_fn(td_target, old_val)
+            max_action = torch.argmax(q_network.forward(s_next_obses, device), dim=2)
+            target_q_next = target_network.forward(s_next_obses, device)
+            target_max = target_q_next.gather(2, max_action.long().unsqueeze(2)).squeeze(-1)
+            target_q = torch.Tensor(s_rewards).unsqueeze(1).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).unsqueeze(1).to(device))
+        curr_q = q_network.forward(s_obs, device).gather(2, torch.LongTensor(s_actions).to(device).unsqueeze(2)).squeeze(-1)
+        loss = loss_fn(target_q, curr_q)
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
@@ -204,7 +207,9 @@ for global_step in range(args.total_timesteps):
 
     if done:
         # TRY NOT TO MODIFY: record rewards for plotting purposes
+        episode += 1
         print(f"global_step={global_step}, episode_reward={episode_reward}")
+        writer.add_scalar("charts/episodic_return_episode", episode_reward, episode)
         writer.add_scalar("charts/episodic_return", episode_reward, global_step)
         writer.add_scalar("charts/epsilon", epsilon, global_step)
         obs, episode_reward = env.reset(), 0
