@@ -24,5 +24,5 @@ experiment management with [weights and biases](https://wandb.ai/site).
 * relational - relational deep reinforcement learning (https://arxiv.org/abs/1806.01830)
 * sil - self imitation learning (https://arxiv.org/abs/1806.05635)  
 * icm - curiosity driven exploration (https://arxiv.org/pdf/1705.05363.pdf)
-* dqn_branching - Action Branching (https://arxiv.org/pdf/1711.08946.pdf)
+* branching - action branching (https://arxiv.org/pdf/1711.08946.pdf)
 
