@@ -5,19 +5,14 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-
+import pybullet_envs
 import argparse
 from distutils.util import strtobool
 import collections
 import numpy as np
 import gym
 from gym.wrappers import TimeLimit, Monitor
-import gym
-import gym_microrts
-from gym.wrappers import TimeLimit, Monitor
-from gym_microrts.envs.vec_env import MicroRTSGridModeVecEnv
-from gym_microrts import microrts_ai
-from gym.spaces import MultiDiscrete
+from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
@@ -27,7 +22,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Hopper-v2",
+    parser.add_argument('--gym-id', type=str, default="HopperBulletEnv-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=7e-4,
                         help='the learning rate of the optimizer')
@@ -75,6 +70,11 @@ if __name__ == "__main__":
     #if not args.seed:
     args.seed = int(time.time())
 
+def one_hot(a, size):
+    b = np.zeros((size))
+    b[a] = 1
+    return b
+
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
@@ -85,23 +85,15 @@ if args.track:
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
     writer = SummaryWriter(f"/tmp/{experiment_name}")
 
-env = MicroRTSGridModeVecEnv(
-    num_selfplay_envs=0,
-    num_bot_envs=1,
-    max_steps=2000,
-    render_theme=2,
-    ai2s=[microrts_ai.randomBiasedAI for _ in range(1)],
-    map_paths=["maps/8x8/basesWorkers8x8.xml"],
-    reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
-)
-
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
+env = gym.make(args.gym_id)
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
+env.seed(args.seed)
 env.action_space.seed(args.seed)
 env.observation_space.seed(args.seed)
 # respect the default timelimit
@@ -133,24 +125,14 @@ class ReplayBuffer():
                np.array(r_lst), np.array(s_prime_lst), \
                np.array(done_mask_lst)
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
     def __init__(self, env, bins=6):
         super(QNetwork, self).__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU())
-
+        self.network = nn.Sequential(nn.Linear(np.array(env.observation_space.shape).prod(), 128),
+                                     nn.ReLU(),
+                                     nn.Linear(128, 128),
+                                     nn.ReLU())
         self.v = nn.Linear(128, 1)
         self.a_heads = nn.ModuleList([nn.Linear(128, bins) for i in range(env.action_space.shape[0])])
 
