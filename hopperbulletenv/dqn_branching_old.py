@@ -127,26 +127,21 @@ class ReplayBuffer():
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, env, num_bins=6):
+    def __init__(self, env, bins=6):
         super(QNetwork, self).__init__()
-        self.num_bins = num_bins
         self.network = nn.Sequential(nn.Linear(np.array(env.observation_space.shape).prod(), 128),
                                      nn.ReLU(),
                                      nn.Linear(128, 128),
                                      nn.ReLU())
         self.v = nn.Linear(128, 1)
-        #self.a_heads = nn.ModuleList([nn.Linear(128, bins) for i in range(env.action_space.shape[0])])
-        self.a = nn.Linear(128, num_bins * env.action_space.shape[0])
+        self.a_heads = nn.ModuleList([nn.Linear(128, bins) for i in range(env.action_space.shape[0])])
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
         x = self.network(x)
         v = self.v(x)
-        #a = torch.stack([h(x) for h in self.a_heads], dim = 1)
-        a = self.a(x).view(x.shape[0], env.action_space.shape[0], -1)
+        a = torch.stack([h(x) for h in self.a_heads], dim = 1)
         q = v.unsqueeze(2) + a - a.mean(2, keepdim = True )
-        q = q.view(x.shape[0], -1)
-        q = torch.split(q, [self.num_bins ]*env.action_space.shape[0], dim=1)
         return q
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -174,7 +169,7 @@ for global_step in range(args.total_timesteps):
     #    action = env.action_space.sample()
     #else:
     logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
-    action = [int(torch.argmax(l.squeeze(0)).cpu().numpy()) for l in logits]
+    action = torch.argmax(logits.squeeze(0), dim=1).cpu().numpy()
 
     action_cont = np.array([bins[aa] for aa in action])
 
@@ -187,14 +182,11 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
-            #max_action = torch.argmax(q_network.forward(s_next_obses, device), dim=2)
-            max_action = [torch.argmax(q, dim=1) for q in q_network.forward(s_next_obses, device)]
+            max_action = torch.argmax(q_network.forward(s_next_obses, device), dim=2)
             target_q_next = target_network.forward(s_next_obses, device)
-            #target_max = target_q_next.gather(2, max_action.long().unsqueeze(2)).squeeze(-1)
-            target_max = [q.gather(1, m_a.unsqueeze(1)) for q, m_a in zip(target_q_next, max_action)]
-            #target_q = torch.Tensor(s_rewards).unsqueeze(1).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).unsqueeze(1).to(device))
-            target_q = torch.stack([torch.Tensor(s_rewards).to(device) + args.gamma * t_m.squeeze(1) * (1 - torch.Tensor(s_dones).to(device)) for t_m in target_max]).mean(0)
-        curr_q = torch.stack([q.gather(1, a.unsqueeze(1)) for q, a in zip(q_network.forward(s_obs, device), torch.LongTensor(s_actions).to(device).T)]).squeeze(2).T.mean(1)
+            target_max = target_q_next.gather(2, max_action.long().unsqueeze(2)).squeeze(-1)
+            target_q = torch.Tensor(s_rewards).unsqueeze(1).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).unsqueeze(1).to(device))
+        curr_q = q_network.forward(s_obs, device).gather(2, torch.LongTensor(s_actions).to(device).unsqueeze(2)).squeeze(-1)
         loss = loss_fn(target_q, curr_q)
 
         if global_step % 100 == 0:
