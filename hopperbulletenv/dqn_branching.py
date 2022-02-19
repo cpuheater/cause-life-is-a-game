@@ -143,7 +143,6 @@ class QNetwork(nn.Module):
         x = self.network(x)
         v = self.v(x)
         a = torch.stack([h(x) for h in self.a_heads], dim = 1)
-        #a = self.a(x).view(x.shape[0], env.action_space.shape[0], -1)
         q = v.unsqueeze(2) + a - a.mean(2, keepdim = True )
         q = q.view(x.shape[0], -1)
         q = torch.split(q, [self.num_bins ]*env.action_space.shape[0], dim=1)
@@ -187,12 +186,9 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
-            #max_action = torch.argmax(q_network.forward(s_next_obses, device), dim=2)
             max_action = [torch.argmax(q, dim=1) for q in q_network.forward(s_next_obses, device)]
             target_q_next = target_network.forward(s_next_obses, device)
-            #target_max = target_q_next.gather(2, max_action.long().unsqueeze(2)).squeeze(-1)
             target_max = [q.gather(1, m_a.unsqueeze(1)) for q, m_a in zip(target_q_next, max_action)]
-            #target_q = torch.Tensor(s_rewards).unsqueeze(1).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).unsqueeze(1).to(device))
             target_q = torch.stack([torch.Tensor(s_rewards).to(device) + args.gamma * t_m.squeeze(1) * (1 - torch.Tensor(s_dones).to(device)) for t_m in target_max]).T
         curr_q = torch.stack([q.gather(1, a.unsqueeze(1)) for q, a in zip(q_network.forward(s_obs, device), torch.LongTensor(s_actions).to(device).T)]).squeeze(2).T
         loss = loss_fn(target_q, curr_q)
