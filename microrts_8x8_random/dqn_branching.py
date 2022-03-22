@@ -47,6 +47,10 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
+    parser.add_argument('--num-bot-envs', type=int, default=1,
+                        help='the number of bot game environment; 16 bot envs measn 16 games')
+    parser.add_argument('--num-selfplay-envs', type=int, default=0,
+                        help='the number of self play envs; 16 self play envs means 8 games')
 
     # Algorithm specific arguments
     parser.add_argument('--buffer-size', type=int, default=10000,
@@ -85,12 +89,13 @@ if args.track:
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
     writer = SummaryWriter(f"/tmp/{experiment_name}")
 
+
 env = MicroRTSGridModeVecEnv(
-    num_selfplay_envs=0,
-    num_bot_envs=1,
-    max_steps=2000,
+    num_selfplay_envs=args.num_selfplay_envs,
+    num_bot_envs=args.num_bot_envs,
+    max_steps=1200,
     render_theme=2,
-    ai2s=[microrts_ai.randomBiasedAI for _ in range(1)],
+    ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
     map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
@@ -104,6 +109,7 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 env.action_space.seed(args.seed)
 env.observation_space.seed(args.seed)
+mapsize = 8 * 8
 # respect the default timelimit
 #assert isinstance(env.action_space, Continous), "only discrete action space is supported"
 if args.capture_video:
@@ -119,19 +125,21 @@ class ReplayBuffer():
 
     def sample(self, n):
         mini_batch = random.sample(self.buffer, n)
-        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
+        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst, invalid_mask_lst = [], [], [], [], [], []
 
         for transition in mini_batch:
-            s, a, r, s_prime, done_mask = transition
+            s, a, r, s_prime, done_mask, invalid_mask = transition
             s_lst.append(s)
             a_lst.append(a)
             r_lst.append(r)
             s_prime_lst.append(s_prime)
             done_mask_lst.append(done_mask)
+            invalid_mask_lst.append(invalid_mask)
 
         return np.array(s_lst), np.array(a_lst), \
                np.array(r_lst), np.array(s_prime_lst), \
-               np.array(done_mask_lst)
+               np.array(done_mask_lst), \
+               torch.stack(invalid_mask_lst)
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -140,7 +148,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, env, bins=6):
+    def __init__(self, env):
         super(QNetwork, self).__init__()
         self.network = nn.Sequential(
             layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
@@ -152,14 +160,14 @@ class QNetwork(nn.Module):
             nn.ReLU())
 
         self.v = nn.Linear(128, 1)
-        self.a_heads = nn.ModuleList([nn.Linear(128, bins) for i in range(env.action_space.shape[0])])
+        self.a_heads = nn.ModuleList([nn.Linear(128, mapsize * n) for n in env.action_plane_space.nvec.tolist()])
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
-        x = self.network(x)
+        x = self.network(x.permute((0, 3, 1, 2)))
         v = self.v(x)
-        a = torch.stack([h(x) for h in self.a_heads], dim = 1)
-        q = v.unsqueeze(2) + a - a.mean(2, keepdim = True )
+        a_list = [h(x) for h in self.a_heads]
+        q = [v.repeat(1, 64).unsqueeze(2) + a.view(x.shape[0], mapsize, -1) - a.view(x.shape[0], mapsize, -1).mean(-1, keepdim=True) for a in a_list]
         return q
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -167,8 +175,8 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
 
 rb = ReplayBuffer(args.buffer_size)
-q_network = QNetwork(env, args.bins).to(device)
-target_network = QNetwork(env, args.bins).to(device)
+q_network = QNetwork(env).to(device)
+target_network = QNetwork(env).to(device)
 target_network.load_state_dict(q_network.state_dict())
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
@@ -178,34 +186,44 @@ print(q_network)
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
 episode_reward = 0
-bins = np.linspace(-1.,1., args.bins)
 episode = 0
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
+    env.render()
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
-    #if random.random() < epsilon:
-    #    action = env.action_space.sample()
-    #else:
-    logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
-    action = torch.argmax(logits.squeeze(0), dim=1).cpu().numpy()
-
-    action_cont = np.array([bins[aa] for aa in action])
+    invalid_action_masks = torch.tensor(np.array(env.get_action_mask())).to(device)
+    if random.random() < epsilon:
+        logits = torch.randn(invalid_action_masks.shape).to(device).squeeze(0)
+        logits = torch.split(logits, env.action_plane_space.nvec.tolist(), dim=1)
+    else:
+        logits = q_network.forward(obs, device)
+    split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
+    logits_masked = [torch.where(masks.bool(), l.squeeze(0), torch.tensor(float("-inf")).to(device)) for l, masks in zip(logits, split_invalid_action_masks)]
+    action = np.array([torch.argmax(l, dim=1).cpu().numpy() for l in logits_masked]).transpose()
 
     # TRY NOT TO MODIFY: execute the game and log data.
-    next_obs, reward, done, _ = env.step(action_cont)
+    try:
+        next_obs, reward, done, infos = env.step(action.reshape(1, -1))
+    except Exception as e:
+        e.printStackTrace()
+        raise
+
     episode_reward += reward
 
     # ALGO LOGIC: training.
-    rb.put((obs, action, reward, next_obs, done))
+    rb.put((obs.squeeze(0), action, reward, next_obs.squeeze(0), done, invalid_action_masks.squeeze(0)))
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
-        s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
+        s_obs, s_actions, s_rewards, s_next_obses, s_dones, invalid_action_masks = rb.sample(args.batch_size)
         with torch.no_grad():
-            max_action = torch.argmax(q_network.forward(s_next_obses, device), dim=2)
+            split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
+            q = q_network.forward(s_next_obses, device)
+            max_action = [torch.argmax(torch.where(masks.view_as(q).bool(), q, torch.tensor(float("-inf")).to(device)), dim=2) for q, masks in zip(q, split_invalid_action_masks)]
             target_q_next = target_network.forward(s_next_obses, device)
-            target_max = target_q_next.gather(2, max_action.long().unsqueeze(2)).squeeze(-1)
-            target_q = torch.Tensor(s_rewards).unsqueeze(1).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).unsqueeze(1).to(device))
-        curr_q = q_network.forward(s_obs, device).gather(2, torch.LongTensor(s_actions).to(device).unsqueeze(2)).squeeze(-1)
-        loss = loss_fn(target_q, curr_q)
+            target_max = [q.gather(1, m_a.unsqueeze(2)) for q, m_a in zip(target_q_next, max_action)]
+            target_q = torch.stack([torch.Tensor(s_rewards).to(device).repeat(1, 64) + args.gamma * t_m.squeeze(2) * ((1 - torch.Tensor(s_dones).to(device)).repeat(1, 64)) for t_m in target_max]).view(-1, mapsize, 7)
+        #dupa = torch.split(torch.LongTensor(s_actions).to(device), 7, 2)
+        curr_q = torch.stack([q.gather(2, a.unsqueeze(1)) for q, a in zip(q_network.forward(s_obs, device), torch.LongTensor(s_actions).to(device).view(-1, 7).T.view(7, -1, mapsize))]).unsqueeze(2).view(-1, mapsize, 7)
+        loss = loss_fn(target_q.view(-1, 7), curr_q.view(-1, 7))
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
