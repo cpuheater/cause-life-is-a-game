@@ -151,7 +151,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, actions, frames=3, bins=2):
+    def __init__(self, actions, frames=3):
         super(QNetwork, self).__init__()
         self.network = nn.Sequential(
             Scale(1 / 255),
@@ -163,15 +163,18 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Flatten(),
             layer_init(nn.Linear(2560, 512)),
-            nn.ReLU(),
-            nn.Linear(512, len(actions))
+            nn.ReLU()
         )
-        self.v = nn.Linear(128, 1)
-        self.a_heads = nn.ModuleList([nn.Linear(128, bins) for i in range(n)])
+
+        self.v = nn.Linear(512, 1)
+        self.a = nn.Linear(512, len(actions))
 
     def forward(self, x):
         x = torch.Tensor(x).to(device)
-        return self.network(x)
+        x = self.network(x)
+        v = self.v(x)
+        a = self.a(x)
+        return v + a - a.mean()
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
@@ -216,10 +219,13 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
-            target_max = torch.max(target_network.forward(s_next_obses), dim=1)[0]
-            td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
-        old_val = q_network.forward(s_obs).gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
-        loss = loss_fn(td_target, old_val)
+            q_next = q_network.forward(s_next_obses)
+            max_action = torch.argmax(q_next, dim=1, keepdim=True)
+            target_q_next = target_network.forward(s_next_obses)
+            target_max = target_q_next.gather(1, max_action.long()).squeeze(1)
+            target_q = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
+        curr_q = q_network.forward(s_obs).gather(1, torch.LongTensor(s_actions).view(-1, 1).to(device)).squeeze()
+        loss = loss_fn(target_q, curr_q)
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
