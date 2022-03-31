@@ -221,7 +221,6 @@ for global_step in range(args.total_timesteps):
             target_q_next = target_network.forward(s_next_obses, device)
             target_max = [q.gather(1, m_a.unsqueeze(2)) for q, m_a in zip(target_q_next, max_action)]
             target_q = torch.stack([torch.Tensor(s_rewards).to(device).repeat(1, 64) + args.gamma * t_m.squeeze(2) * ((1 - torch.Tensor(s_dones).to(device)).repeat(1, 64)) for t_m in target_max]).view(-1, mapsize, 7)
-        #dupa = torch.split(torch.LongTensor(s_actions).to(device), 7, 2)
         curr_q = torch.stack([q.gather(2, a.unsqueeze(1)) for q, a in zip(q_network.forward(s_obs, device), torch.LongTensor(s_actions).to(device).view(-1, 7).T.view(7, -1, mapsize))]).unsqueeze(2).view(-1, mapsize, 7)
         loss = loss_fn(target_q.view(-1, 7), curr_q.view(-1, 7))
 

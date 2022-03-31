@@ -151,7 +151,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, actions, frames=3, bins=2):
+    def __init__(self, actions, frames=3):
         super(QNetwork, self).__init__()
         self.network = nn.Sequential(
             Scale(1 / 255),
@@ -166,8 +166,6 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(512, len(actions))
         )
-        self.v = nn.Linear(128, 1)
-        self.a_heads = nn.ModuleList([nn.Linear(128, bins) for i in range(n)])
 
     def forward(self, x):
         x = torch.Tensor(x).to(device)
