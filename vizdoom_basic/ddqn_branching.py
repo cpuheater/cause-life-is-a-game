@@ -151,7 +151,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, actions, frames=3):
+    def __init__(self, actions, frames=3, bins=2):
         super(QNetwork, self).__init__()
         self.network = nn.Sequential(
             Scale(1 / 255),
@@ -167,14 +167,15 @@ class QNetwork(nn.Module):
         )
 
         self.v = nn.Linear(512, 1)
-        self.a = nn.Linear(512, len(actions))
+        self.a_heads = nn.ModuleList([nn.Linear(512, bins) for i in range(n)])
 
     def forward(self, x):
         x = torch.Tensor(x).to(device)
         x = self.network(x)
         v = self.v(x)
-        a = self.a(x)
-        return v + a - a.mean()
+        a = torch.stack([h(x) for h in self.a_heads], dim = 1)
+        q = v.unsqueeze(2) + a - a.mean(2, keepdim = True )
+        return q
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
@@ -200,12 +201,14 @@ for global_step in range(args.total_timesteps):
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     if random.random() < epsilon:
         action = torch.tensor(random.randint(0, len(actions) - 1)).long().item()
+        action = actions[action]
     else:
         logits = q_network.forward(obs.reshape((1,)+obs.shape))
-        action = torch.argmax(logits, dim=1).tolist()[0]
+        action = torch.argmax(logits.squeeze(0), dim=1)
+        action = action.tolist()
 
     # TRY NOT TO MODIFY: execute the game and log data.
-    reward = game.make_action(actions[action], frame_repeat)
+    reward = game.make_action(action, frame_repeat)
     reward *= 0.01
     done = game.is_episode_finished()
 
@@ -220,11 +223,11 @@ for global_step in range(args.total_timesteps):
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
             q_next = q_network.forward(s_next_obses)
-            max_action = torch.argmax(q_next, dim=1, keepdim=True)
+            max_action = torch.argmax(q_next, dim=2, keepdim=True)
             target_q_next = target_network.forward(s_next_obses)
-            target_max = target_q_next.gather(1, max_action.long()).squeeze(1)
-            target_q = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
-        curr_q = q_network.forward(s_obs).gather(1, torch.LongTensor(s_actions).view(-1, 1).to(device)).squeeze()
+            target_max = target_q_next.gather(2, max_action.long()).squeeze(-1)
+            target_q = torch.Tensor(s_rewards).unsqueeze(1).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).unsqueeze(1).to(device))
+        curr_q = q_network.forward(s_obs).gather(2, torch.LongTensor(s_actions).unsqueeze(2).to(device)).squeeze(-1)
         loss = loss_fn(target_q, curr_q)
 
         if global_step % 100 == 0:
