@@ -16,7 +16,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
+from vizdoom import Button
 import argparse
 from distutils.util import strtobool
 import numpy as np
@@ -28,13 +28,64 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import typing as t
+import itertools
+
+# Buttons that cannot be used together
+MUTUALLY_EXCLUSIVE_GROUPS = [
+    [Button.MOVE_RIGHT, Button.MOVE_LEFT],
+    [Button.TURN_RIGHT, Button.TURN_LEFT],
+    [Button.MOVE_FORWARD, Button.MOVE_BACKWARD],
+]
+
+# Buttons that can only be used alone.
+EXCLUSIVE_BUTTONS = [Button.ATTACK]
+
+
+def has_exclusive_button(actions: np.ndarray, buttons: np.array) -> np.array:
+    exclusion_mask = np.isin(buttons, EXCLUSIVE_BUTTONS)
+
+    # Flag actions that have more than 1 active button among exclusive list.
+    return (np.any(actions.astype(bool) & exclusion_mask, axis=-1)) & (np.sum(actions, axis=-1) > 1)
+
+
+def has_excluded_pair(actions: np.ndarray, buttons: np.array) -> np.array:
+    # Create mask of shape (n_mutual_exclusion_groups, n_available_buttons), marking location of excluded pairs.
+    mutual_exclusion_mask = np.array([np.isin(buttons, excluded_group)
+                                      for excluded_group in MUTUALLY_EXCLUSIVE_GROUPS])
+
+    # Flag actions that have more than 1 button active in any of the mutual exclusion groups.
+    return np.any(np.sum(
+        # Resulting shape (n_actions, n_mutual_exclusion_groups, n_available_buttons)
+        (actions[:, np.newaxis, :] * mutual_exclusion_mask.astype(int)),
+        axis=-1) > 1, axis=-1)
+
+
+def get_available_actions(buttons: np.array) -> t.List[t.List[float]]:
+    # Create list of all possible actions of size (2^n_available_buttons x n_available_buttons)
+    action_combinations = np.array([list(seq) for seq in itertools.product([0., 1.], repeat=len(buttons))])
+
+    # Build action mask from action combinations and exclusion mask
+    illegal_mask = (has_excluded_pair(action_combinations, buttons)
+                    | has_exclusive_button(action_combinations, buttons))
+
+    possible_actions = action_combinations[~illegal_mask]
+    possible_actions = possible_actions[np.sum(possible_actions, axis=1) > 0]  # Remove no-op
+
+    print('Built action space of size {} from buttons {}'.format(len(possible_actions), buttons))
+    return possible_actions.tolist()
+
+possible_actions = get_available_actions(np.array([
+    Button.ATTACK, Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT,
+    Button.MOVE_RIGHT]))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="defend_the_center",
+    parser.add_argument('--gym-id', type=str, default="deathmatch",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -113,15 +164,14 @@ class ViZDoomEnv:
         self.reward_scale = reward_scale
         game = DoomGame()
         game.load_config(f"./scenarios/{game_config}.cfg")
+        game.add_game_args('-host 1 -deathmatch +viz_nocheat 0 +cl_run 1 +name AGENT +colorset 0' +
+                           '+sv_forcerespawn 1 +sv_respawnprotect 1 +sv_nocrouch 1 +sv_noexit 1')
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
 
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
+        self.actions = get_available_actions(np.array(game.get_available_buttons()))
+        self.action_space = spaces.Discrete(len(self.actions))
+
         self.frame_skip = frame_skip
 
         game.set_seed(seed)

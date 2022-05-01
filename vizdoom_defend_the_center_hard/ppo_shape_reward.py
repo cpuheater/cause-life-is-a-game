@@ -16,7 +16,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
+from vizdoom import Button
 import argparse
 from distutils.util import strtobool
 import numpy as np
@@ -28,6 +28,8 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import typing as t
+import itertools
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -44,7 +46,7 @@ if __name__ == "__main__":
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
-    parser.add_argument('--cuda', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
+    parser.add_argument('--cuda', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, cuda will not be enabled by default')
     parser.add_argument('--prod-mode', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='run the script in production mode and use wandb to log outputs')
@@ -79,21 +81,21 @@ if __name__ == "__main__":
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
-                         help="the K epochs to update the policy")
+                        help="the K epochs to update the policy")
     parser.add_argument('--kle-stop', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                         help='If toggled, the policy updates will be early stopped w.r.t target-kl')
+                        help='If toggled, the policy updates will be early stopped w.r.t target-kl')
     parser.add_argument('--kle-rollback', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                         help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
+                        help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
     parser.add_argument('--target-kl', type=float, default=0.03,
-                         help='the target-kl variable that is referred by --kl')
+                        help='the target-kl variable that is referred by --kl')
     parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                         help='Use GAE for advantage computation')
+                        help='Use GAE for advantage computation')
     parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help="Toggles advantages normalization")
+                        help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help="Toggle learning rate annealing for policy and value networks")
+                        help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+                        help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
     #if not args.seed:
@@ -101,7 +103,6 @@ if __name__ == "__main__":
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
-
 
 class ViZDoomEnv:
     def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
@@ -116,19 +117,35 @@ class ViZDoomEnv:
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
 
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
+        self.actions = self.get_actions(game.get_available_buttons())
+        self.action_space = spaces.Discrete(len(self.actions))
+
         self.frame_skip = frame_skip
 
         game.set_seed(seed)
         game.set_window_visible(render)
         game.init()
-
         self.game = game
+
+    def get_actions(self, buttons):
+        # filter out forbidden actions
+        forbidden_actions = [ [Button.MOVE_RIGHT, Button.MOVE_LEFT], [Button.TURN_RIGHT, Button.TURN_LEFT]]
+
+        # buttons = [Button.ATTACK, Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT, Button.MOVE_RIGHT]
+        actions = np.array([list(e) for e in itertools.product([0., 1.], repeat=len(buttons))])
+        mask = np.array([np.isin(buttons, action) for action in forbidden_actions])
+
+        mask = (actions[:, np.newaxis, :] * mask.astype(int)).sum(2)
+        mask = np.any(mask>=2, 1)
+        actions = actions[~mask]
+        index = buttons.index(Button.ATTACK)
+        actions = actions[actions[:, index] <= 0]
+        action = np.zeros(len(buttons))
+        action[index] = 1
+
+        actions = np.concatenate((actions, action[np.newaxis, :]), axis=0)
+        actions = actions[actions.sum(1) > 0]
+        return actions
 
     def get_current_input(self):
         state = self.game.get_state()
@@ -213,7 +230,7 @@ class VecPyTorch(VecEnvWrapper):
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
-        '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+    '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
@@ -236,9 +253,9 @@ def make_env(seed):
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
 envs = VecPyTorch(
-         SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-         device
-     )
+    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+    device
+)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:

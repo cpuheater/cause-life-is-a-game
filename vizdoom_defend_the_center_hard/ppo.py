@@ -108,7 +108,7 @@ class ViZDoomEnv:
         # assign observation space
         channel_num = 3
 
-        self.observation_shape = (channel_num, 64, 112)
+        self.observation_shape = (channel_num, 60, 80)
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
         self.reward_scale = reward_scale
         game = DoomGame()
@@ -267,7 +267,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(1536, 512)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
