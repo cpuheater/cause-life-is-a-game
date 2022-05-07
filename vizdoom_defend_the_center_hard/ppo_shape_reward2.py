@@ -5,7 +5,7 @@ from collections import deque
 import gym
 from gym import spaces
 import cv2
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, GameVariable, Button, AutomapMode, Mode, doom_fixed_to_double
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
 
 cv2.ocl.setUseOpenCL(False)
@@ -16,7 +16,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-import matplotlib.pyplot as plt
+from vizdoom import Button, GameVariable
 import argparse
 from distutils.util import strtobool
 import numpy as np
@@ -28,15 +28,18 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import typing as t
+import itertools
+import string
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="deadly_corridor",
+    parser.add_argument('--gym-id', type=str, default="defend_the_center",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=6e-4,
+    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -54,13 +57,13 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=0.01,
+    parser.add_argument('--scale-reward', type=float, default=1,
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
 
     # Algorithm specific arguments
-    parser.add_argument('--n-minibatch', type=int, default=8,
+    parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
     parser.add_argument('--num-envs', type=int, default=8,
                         help='the number of parallel game environment')
@@ -103,93 +106,283 @@ args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
 
+# Rewards
+# 1 per kill
+reward_factor_frag = 1.0
+reward_factor_damage = 0.01
+
+# Player can move at ~16.66 units per tick
+reward_factor_distance = 5e-4
+penalty_factor_distance = -2.5e-3
+reward_threshold_distance = 3.0
+
+# Pistol clips have 10 bullets
+reward_factor_ammo_increment = 0.02
+reward_factor_ammo_decrement = -0.01
+
+# Player starts at 100 health
+reward_factor_health_increment = 0.02
+reward_factor_health_decrement = -0.01
+reward_factor_armor_increment = 0.01
+
+AMMO_VARIABLES = [GameVariable.AMMO0, GameVariable.AMMO1, GameVariable.AMMO2, GameVariable.AMMO3, GameVariable.AMMO4,
+                  GameVariable.AMMO5, GameVariable.AMMO6, GameVariable.AMMO7, GameVariable.AMMO8, GameVariable.AMMO9]
+
+# List of game variables storing weapon information. Used for keeping track of ammunition-related rewards.
+WEAPON_VARIABLES = [GameVariable.WEAPON0, GameVariable.WEAPON1, GameVariable.WEAPON2, GameVariable.WEAPON3,
+                    GameVariable.WEAPON4,
+                    GameVariable.WEAPON5, GameVariable.WEAPON6, GameVariable.WEAPON7, GameVariable.WEAPON8,
+                    GameVariable.WEAPON9]
+
 
 class ViZDoomEnv:
-    def __init__(self, seed, game_config, render, reward_scale, frame_skip):
-        channel_num = 1
-
-        self.observation_shape = (channel_num, 64, 112)
+    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4, n_bots=8):
+        # assign observation space
+        channel_num = 3
+        self.n_bots = n_bots
+        self.last_frags = 0
+        self.observation_shape = (channel_num, 60, 80)
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
         self.reward_scale = reward_scale
         game = DoomGame()
-
         game.load_config(f"./scenarios/{game_config}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
-        print(game.get_available_buttons())
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
 
-        actions = [
-            [True, False, True, False, False, False],
-            [False, True, True, False, False, False],
-            [False, False, True, False, False, False],
-            [False, False, True, True, False, False],
-            [False, False, True, False, True, False],
-            [False, False, True, False, False, True]
-        ]
+        self.actions = self.get_actions(game.get_available_buttons())
+        self.action_space = spaces.Discrete(len(self.actions))
 
-        self.actions = actions
         self.frame_skip = frame_skip
+
         game.set_seed(seed)
         game.set_window_visible(render)
         game.init()
-
         self.game = game
-        self.last_total_kills = None
-        self.last_total_health = None
-        self.metadata = None
+
+        self.last_health = 100
+        self.last_x, self.last_y = self._get_player_pos()
+        self.ammo_state = self._get_ammo_state()
+        self.weapon_state = self._get_weapon_state()
+        self.total_rew = self.last_damage_dealt = self.deaths = self.last_frags = self.last_armor = 0
+
+        # Store individual reward contributions for logging purposes
+        self.rewards_stats = {
+            'frag': 0,
+            'damage': 0,
+            'ammo': 0,
+            'health': 0,
+            'armor': 0,
+            'distance': 0,
+        }
+        self.name = ''.join(random.choices(string.ascii_uppercase + string.digits, k=2))
+
+    def get_actions(self, buttons):
+        # filter out forbidden actions
+        forbidden_actions = [ [Button.MOVE_RIGHT, Button.MOVE_LEFT], [Button.TURN_RIGHT, Button.TURN_LEFT]]
+
+        # buttons = [Button.ATTACK, Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT, Button.MOVE_RIGHT]
+        actions = np.array([list(e) for e in itertools.product([0., 1.], repeat=len(buttons))])
+        mask = np.array([np.isin(buttons, action) for action in forbidden_actions])
+
+        mask = (actions[:, np.newaxis, :] * mask.astype(int)).sum(2)
+        mask = np.any(mask>=2, 1)
+        actions = actions[~mask]
+        index = buttons.index(Button.ATTACK)
+        actions = actions[actions[:, index] <= 0]
+        action = np.zeros(len(buttons))
+        action[index] = 1
+
+        actions = np.concatenate((actions, action[np.newaxis, :]), axis=0)
+        actions = actions[actions.sum(1) > 0]
+        return actions
 
     def get_current_input(self):
         state = self.game.get_state()
         res_source = []
         res_source.append(state.screen_buffer)
         res = np.vstack(res_source)
-        #res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
-        res = np.transpose(res, axes=(1, 2, 0))
-        res = cv2.resize(
-            res, (112, 64), interpolation=cv2.INTER_AREA
-        )
-        res = cv2.cvtColor(res, cv2.COLOR_RGB2GRAY)
-        res = np.expand_dims(res, axis=0)
+        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
         self.last_input = res
         return res
 
-    def get_health_reward(self):
-        if self.last_total_health == None:
-            health = 0
-        else:
-            health = self.game.get_game_variable(GameVariable.HEALTH) - self.last_total_health
-        self.last_total_health = self.game.get_game_variable(GameVariable.HEALTH)
-        return health  if health < 0 else 0
-
-    def get_kill_reward(self):
-        if self.last_total_kills == None:
-            kill = 0
-        else:
-            kill = self.game.get_game_variable(GameVariable.KILLCOUNT) - self.last_total_kills
-        self.last_total_kills = self.game.get_game_variable(GameVariable.KILLCOUNT)
-        return kill * 5 if kill > 0 else 0
-
     def step(self, action):
         info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
+        self.game.make_action(self.actions[action], self.frame_skip)
+        frags = self.game.get_game_variable(GameVariable.FRAGCOUNT)
+        reward = frags - self.last_frags
+        self.last_frags = frags
+
+        self._respawn_if_dead()
         done = self.game.is_episode_finished()
         if done:
             ob = self.last_input
         else:
+            self.game_variables = self.game.get_state().game_variables
+            info["game_variables"] = self.game_variables
             ob = self.get_current_input()
-        reward = (reward + self.get_kill_reward() + self.get_health_reward()) * self.reward_scale
+        # reward scaling
+        shaped_reward = self.shape_rewards()
+        reward = reward + shaped_reward
         self.total_reward += reward
         self.total_length += 1
 
         if done:
             info['reward'] = self.total_reward
             info['length'] = self.total_length
+            info["game_variables"] = self.game_variables
 
         return ob, reward, done, info
 
+    def _respawn_if_dead(self):
+        if not self.game.is_episode_finished():
+            if self.game.is_player_dead():
+                self.game.respawn_player()
+
+    def _compute_distance_reward(self, x, y):
+        """Computes a reward/penalty based on the distance travelled since last update."""
+        dx = self.last_x - x
+        dy = self.last_y - y
+
+        distance = np.sqrt(dx ** 2 + dy ** 2)
+
+        if distance - reward_threshold_distance > 0:
+            reward = reward_factor_distance
+        else:
+            reward = -reward_factor_distance
+
+        self.last_x = x
+        self.last_y = y
+        self._log_reward_stat('distance', reward)
+
+        return reward
+
+    def _compute_damage_reward(self):
+        """Computes a reward based on total damage inflicted to enemies since last update."""
+        damage_dealt = self.game.get_game_variable(GameVariable.DAMAGECOUNT)
+        reward = reward_factor_damage * (damage_dealt - self.last_damage_dealt)
+
+        self.last_damage_dealt = damage_dealt
+        self._log_reward_stat('damage', reward)
+
+        return reward
+
+    def _compute_health_reward(self):
+        """Computes a reward/penalty based on total health change since last update."""
+        # When the player is dead, the health game variable can be -999900
+        health = max(self.game.get_game_variable(GameVariable.HEALTH), 0)
+
+        health_reward = reward_factor_health_increment * max(0, health - self.last_health)
+        health_penalty = reward_factor_health_decrement * min(0, health - self.last_health)
+        reward = health_reward - health_penalty
+
+        self.last_health = health
+        self._log_reward_stat('health', reward)
+
+        return reward
+
+    def _compute_armor_reward(self):
+        """Computes a reward/penalty based on total armor change since last update."""
+        armor = self.game.get_game_variable(GameVariable.ARMOR)
+        reward = reward_factor_armor_increment * max(0, armor - self.last_armor)
+
+        self.last_armor = armor
+        self._log_reward_stat('armor', reward)
+
+        return reward
+
+    def _compute_ammo_reward(self):
+        """Computes a reward/penalty based on total ammunition change since last update."""
+        self.weapon_state = self._get_weapon_state()
+
+        new_ammo_state = self._get_ammo_state()
+        ammo_diffs = (new_ammo_state - self.ammo_state) * self.weapon_state
+        ammo_reward = reward_factor_ammo_increment * max(0, np.sum(ammo_diffs))
+        ammo_penalty = reward_factor_ammo_decrement * min(0, np.sum(ammo_diffs))
+        reward = ammo_reward - ammo_penalty
+
+        self.ammo_state = new_ammo_state
+        self._log_reward_stat('ammo', reward)
+
+        return reward
+
+    def _get_player_pos(self):
+        """Returns the player X- and Y- coordinates."""
+        return self.game.get_game_variable(GameVariable.POSITION_X), self.game.get_game_variable(
+            GameVariable.POSITION_Y)
+
+    def _get_ammo_state(self):
+        """Returns the total available ammunition per weapon slot."""
+        ammo_state = np.zeros(10)
+
+        for i in range(10):
+            ammo_state[i] = self.game.get_game_variable(AMMO_VARIABLES[i])
+
+        return ammo_state
+
+    def _get_weapon_state(self):
+        """Returns which weapon slots can be used. Available weapons are encoded as ones."""
+        weapon_state = np.zeros(10)
+
+        for i in range(10):
+            weapon_state[i] = self.game.get_game_variable(WEAPON_VARIABLES[i])
+
+        return weapon_state
+
+    def _log_reward_stat(self, kind: str, reward: float):
+        self.rewards_stats[kind] += reward
+
+    def _reset_player(self):
+        self.last_health = 100
+        self.last_armor = 0
+        self.game.respawn_player()
+        self.last_x, self.last_y = self._get_player_pos()
+        self.ammo_state = self._get_ammo_state()
+
+    def shape_rewards(self):
+        reward_contributions = [
+            self._compute_damage_reward(),
+            self._compute_ammo_reward(),
+            self._compute_health_reward(),
+            self._compute_armor_reward(),
+            self._compute_distance_reward(*self._get_player_pos()),
+        ]
+        return sum(reward_contributions)
+
+    def _reset_bots(self):
+        # Make sure you have the bots.cfg file next to the program entry point.
+        self.game.send_game_command('removebots')
+        for i in range(self.n_bots):
+            self.game.send_game_command('addbot')
+
+    def _print_state(self):
+        server_state = self.game.get_server_state()
+        player_scores = list(zip(
+            server_state.players_names,
+            server_state.players_frags,
+            server_state.players_in_game))
+        player_scores = sorted(player_scores, key=lambda tup: tup[1])
+
+        print('*** DEATHMATCH RESULTS ***')
+        for player_name, player_score, player_ingame in player_scores:
+            if player_ingame:
+                print(f' - {player_name}: {player_score}')
+
+        print('\nREWARD BREAKDOWN')
+        print('Agent {} frags: {}, deaths: {}, total reward: {:.2f}'.format(
+            self.name,
+            self.last_frags,
+            self.deaths,
+            self.total_rew
+        ))
+        for k, v in self.rewards_stats.items():
+            print(f'- {k}: {v:+.1f}')
+        print('***************************************\n\n')
+
+
     def reset(self):
+        self._print_state()
+        self._reset_bots()
+        self.last_frags = 0
         self.game.new_episode()
         self.total_reward = 0
         self.total_length = 0
@@ -220,50 +413,6 @@ class VecPyTorch(VecEnvWrapper):
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
 
-# https://github.com/openai/baselines/blob/master/baselines/common/vec_env/vec_frame_stack.py
-class VecPyTorchFrameStack(VecEnvWrapper):
-    def __init__(self, venv, nstack, device=None):
-        self.venv = venv
-        self.nstack = nstack
-
-        wos = venv.observation_space  # wrapped ob space
-        self.shape_dim0 = wos.shape[0]
-        low = np.repeat(wos.low, self.nstack, axis=0)
-        high = np.repeat(wos.high, self.nstack, axis=0)
-
-        if device is None:
-            device = torch.device('cpu')
-        self.stacked_obs = torch.zeros((venv.num_envs, ) +
-                                       low.shape).to(device)
-
-        observation_space = gym.spaces.Box(
-            low=low, high=high, dtype=venv.observation_space.dtype)
-        print(observation_space)
-        VecEnvWrapper.__init__(self, venv, observation_space=observation_space)
-
-    def step_wait(self):
-        obs, rews, news, infos = self.venv.step_wait()
-        self.stacked_obs[:, :-self.shape_dim0] = \
-            self.stacked_obs[:, self.shape_dim0:].clone()
-        for (i, new) in enumerate(news):
-            if new:
-                self.stacked_obs[i] = 0
-        self.stacked_obs[:, -self.shape_dim0:] = obs
-        return self.stacked_obs, rews, news, infos
-
-    def reset(self):
-        obs = self.venv.reset()
-        if torch.backends.cudnn.deterministic:
-            self.stacked_obs = torch.zeros(self.stacked_obs.shape)
-        else:
-            self.stacked_obs.zero_()
-        self.stacked_obs[:, -self.shape_dim0:] = obs
-        return self.stacked_obs
-
-    def close(self):
-        self.venv.close()
-
-
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
@@ -280,7 +429,6 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-print(device)
 def make_env(seed):
     def thunk():
         env = ViZDoomEnv(seed, args.gym_id, render=True, reward_scale=args.scale_reward, frame_skip=args.frame_skip)
@@ -289,11 +437,12 @@ def make_env(seed):
         return env
     return thunk
 
-#envs = VecPyTorchFrameStack(
-#    VecPyTorch(DummyVecEnv([make_env(args.seed+i) for i in range(args.num_envs)]), device), 4, device)
+#envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
-envs = VecPyTorchFrameStack(VecPyTorch(
-    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),device), 4, device)
+envs = VecPyTorch(
+    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+    device
+)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
@@ -311,7 +460,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=4):
+    def __init__(self, envs, frames=3):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),
@@ -322,7 +471,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
+            layer_init(nn.Linear(1536, 512)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
@@ -389,12 +538,19 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
+        #for info in infos:
+        #    if 'episode' in info.keys():
+        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+        #        break
         for info in infos:
             if 'reward' in info.keys():
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
             if 'length' in info.keys():
+                print(f"length: {info['length']} game_variables: {info['game_variables']}")
                 writer.add_scalar("charts/episode_length", info['length'], global_step)
 
+    # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
         last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
         if args.gae:

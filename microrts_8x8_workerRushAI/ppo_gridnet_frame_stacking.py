@@ -92,7 +92,6 @@ args.num_envs = args.num_selfplay_envs + args.num_bot_envs
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-
 class VecMonitor(VecEnvWrapper):
     def __init__(self, venv):
         VecEnvWrapper.__init__(self, venv)
@@ -126,6 +125,46 @@ class VecMonitor(VecEnvWrapper):
                 newinfos[i] = info
         return obs, rews, dones, newinfos
 
+# https://github.com/openai/baselines/blob/master/baselines/common/vec_env/vec_frame_stack.py
+class VecFrameStack(VecEnvWrapper):
+    def __init__(self, venv, nstack, device=None):
+        self.venv = venv
+        self.nstack = nstack
+
+        wos = venv.observation_space  # wrapped ob space
+        self.shape_dim0 = wos.shape[-1]
+        low = np.repeat(wos.low, self.nstack, axis=-1)
+        high = np.repeat(wos.high, self.nstack, axis=-1)
+
+        if device is None:
+            device = torch.device('cpu')
+        self.stacked_obs = torch.zeros((venv.num_envs, ) +
+                                       low.shape).to(device)
+        observation_space = gym.spaces.Box(
+            low=low, high=high, dtype=venv.observation_space.dtype)
+        VecEnvWrapper.__init__(self, venv, observation_space=observation_space)
+
+    def step_wait(self):
+        obs, rews, news, infos = self.venv.step_wait()
+        self.stacked_obs[:, :, :, :-self.shape_dim0] = \
+            self.stacked_obs[:,: ,:, self.shape_dim0:].clone()
+        for (i, new) in enumerate(news):
+            if new:
+                self.stacked_obs[i] = 0
+        self.stacked_obs[:, :, :, -self.shape_dim0:] = torch.Tensor(obs).to(device)
+        return self.stacked_obs, rews, news, infos
+
+    def reset(self):
+        obs = self.venv.reset()
+        if torch.backends.cudnn.deterministic:
+            self.stacked_obs = torch.zeros(self.stacked_obs.shape)
+        else:
+            self.stacked_obs.zero_()
+        self.stacked_obs[:, :, :, -self.shape_dim0:] = torch.Tensor(obs).to(device)
+        return self.stacked_obs
+
+    def close(self):
+        self.venv.close()
 
 class MicroRTSStatsRecorder(VecEnvWrapper):
     def __init__(self, env, gamma):
@@ -179,12 +218,13 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.workerRushAI for _ in range(args.num_bot_envs)],
     map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 envs = MicroRTSStatsRecorder(envs, args.gamma)
 envs = VecMonitor(envs)
+envs = VecFrameStack(envs, 3)
 if args.capture_video:
     envs = VecVideoRecorder(envs, f'videos/{experiment_name}',
                             record_video_trigger=lambda x: x % 10000000 == 0, video_length=2000)
@@ -229,42 +269,23 @@ class Agent(nn.Module):
     def __init__(self, mapsize=8 * 8):
         super(Agent, self).__init__()
         self.mapsize = mapsize
-        h, w, c = envs.observation_space.shape
-        self.encoder = nn.Sequential(
-            Transpose((0, 3, 1, 2)),
-            layer_init(nn.Conv2d(c, 32, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(27 * 3, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
-        )
-
-        self.actor = nn.Sequential(
-            layer_init(nn.ConvTranspose2d(64, 128, 3, stride=2, padding=1, output_padding=1)),
-            nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=0)),
-            nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=0)),
-            nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(32, 78, 3, stride=2, padding=2, output_padding=1)),
-            Transpose((0, 2, 3, 1)),
-        )
-        self.critic = nn.Sequential(
             nn.Flatten(),
-            layer_init(nn.Linear(64, 128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128, 1), std=1),
-        )
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(), )
+        self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_plane_space.nvec.sum()), std=0.01)
+        self.critic = layer_init(nn.Linear(128, 1), std=1)
         self.register_buffer("mask_value", torch.tensor(-1e8))
 
+    def forward(self, x):
+        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+
     def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None):
-        hidden = self.encoder(x)
+        hidden = self.forward(x)
         logits = self.actor(hidden)
         grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
         split_logits = torch.split(grid_logits, envs.action_plane_space.nvec.tolist(), dim=1)
@@ -294,7 +315,7 @@ class Agent(nn.Module):
         return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks, self.critic(hidden)
 
     def get_value(self, x):
-        return self.critic(self.encoder(x))
+        return self.critic(self.forward(x))
 
 
 agent = Agent().to(device)
@@ -339,6 +360,13 @@ if args.prod_mode and wandb.run.resumed:
     agent.load_state_dict(torch.load(f"models/{experiment_name}/agent.pt"))
     agent.eval()
     print(f"resumed at update {starting_update}")
+
+
+print("Model's state_dict:")
+for param_tensor in agent.state_dict():
+    print(param_tensor, "\t", agent.state_dict()[param_tensor].size())
+total_params = sum([param.nelement() for param in agent.parameters()])
+print("Model's total parameters:", total_params)
 
 for update in range(starting_update, num_updates + 1):
     # Annealing the rate if instructed to do so.
