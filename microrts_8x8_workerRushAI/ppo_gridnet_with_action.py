@@ -237,15 +237,19 @@ class Agent(nn.Module):
             nn.Flatten(),
             layer_init(nn.Linear(128, 128)),
             nn.ReLU(), )
+        self.fc = layer_init(nn.Linear(128 + 448, 128), std=1)
         self.actor = layer_init(nn.Linear(128, self.mapsize * envs.action_plane_space.nvec.sum()), std=0.01)
         self.critic = layer_init(nn.Linear(128, 1), std=1)
         self.register_buffer("mask_value", torch.tensor(-1e8))
 
-    def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+    def forward(self, x, prev_action):
+        x = self.network(x.permute((0, 3, 1, 2)))  # "bhwc" -> "bchw"
+        x = torch.cat((x, prev_action.flatten(1,2)), dim=1)
+        x = self.fc(x)
+        return x
 
-    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None):
-        hidden = self.forward(x)
+    def get_action_and_value(self, x, action=None, prev_action=None, invalid_action_masks=None, envs=None):
+        hidden = self.forward(x, prev_action)
         logits = self.actor(hidden)
         grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
         split_logits = torch.split(grid_logits, envs.action_plane_space.nvec.tolist(), dim=1)
@@ -274,8 +278,8 @@ class Agent(nn.Module):
         action = action.T.view(-1, self.mapsize, num_predicted_parameters)
         return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks, self.critic(hidden)
 
-    def get_value(self, x):
-        return self.critic(self.forward(x))
+    def get_value(self, x, prev_action):
+        return self.critic(self.forward(x, prev_action))
 
 
 agent = Agent().to(device)
@@ -291,6 +295,7 @@ invalid_action_shape = (mapsize, envs.action_plane_space.nvec.sum())
 
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
 actions = torch.zeros((args.num_steps, args.num_envs) + action_space_shape).to(device)
+prev_actions = torch.zeros((args.num_steps, args.num_envs) + action_space_shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -308,7 +313,7 @@ num_updates = args.total_timesteps // args.batch_size
 ## CRASH AND RESUME LOGIC:
 starting_update = 1
 from jpype.types import JArray, JInt
-
+prev_action = torch.zeros_like(actions[0])
 if args.prod_mode and wandb.run.resumed:
     print("previous run.summary", run.summary)
     starting_update = run.summary['charts/update'] + 1
@@ -338,10 +343,12 @@ for update in range(starting_update, num_updates + 1):
         with torch.no_grad():
             invalid_action_masks[step] = torch.tensor(np.array(envs.get_action_mask())).to(device)
             action, logproba, _, _, vs = agent.get_action_and_value(
-                next_obs, envs=envs, invalid_action_masks=invalid_action_masks[step]
+                next_obs, prev_action=prev_action, envs=envs, invalid_action_masks=invalid_action_masks[step]
             )
             values[step] = vs.flatten()
         actions[step] = action
+        prev_actions[step] = prev_action
+        prev_action = action
         logprobs[step] = logproba
         try:
             next_obs, rs, ds, infos = envs.step(action.cpu().numpy().reshape(envs.num_envs, -1))
@@ -362,7 +369,7 @@ for update in range(starting_update, num_updates + 1):
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), prev_action).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -392,6 +399,7 @@ for update in range(starting_update, num_updates + 1):
     b_obs = obs.reshape((-1,) + envs.observation_space.shape)
     b_logprobs = logprobs.reshape(-1)
     b_actions = actions.reshape((-1,) + action_space_shape)
+    b_prev_actions = prev_actions.reshape((-1,) + action_space_shape)
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
@@ -411,6 +419,7 @@ for update in range(starting_update, num_updates + 1):
             _, newlogproba, entropy, _, new_values = agent.get_action_and_value(
                 b_obs[minibatch_ind],
                 b_actions.long()[minibatch_ind],
+                b_prev_actions.long()[minibatch_ind],
                 b_invalid_action_masks[minibatch_ind],
                 envs)
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
