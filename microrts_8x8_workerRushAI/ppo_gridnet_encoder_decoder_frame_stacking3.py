@@ -151,8 +151,6 @@ class VecFrameStack(VecEnvWrapper):
 
     def step_wait(self):
         obs, rews, news, infos = self.venv.step_wait()
-        dupa = obs
-        ala = self.mask
         self.stacked_obs[:, :, :, :-self.shape_dim0] = \
             self.stacked_obs[:,: ,:, self.shape_dim0:].clone()
         for (i, new) in enumerate(news):

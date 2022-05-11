@@ -143,12 +143,12 @@ class QNetwork(nn.Module):
         x = self.network(x)
         v = self.v(x)
         a = torch.stack([h(x) for h in self.a_heads], dim = 1)
-        dupa_a = [h(x) for h in self.a_heads]
+        tmp_a = [h(x) for h in self.a_heads]
         q = v.unsqueeze(2) + a - a.mean(2, keepdim = True )
-        dupa_q = [v + a - a.mean(1, keepdim=True) for a in dupa_a]
+        tmp_q = [v + a - a.mean(1, keepdim=True) for a in tmp_a]
         q = q.view(x.shape[0], -1)
         q = torch.split(q, [self.num_bins ]*env.action_space.shape[0], dim=1)
-        return dupa_q
+        return tmp_q
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
