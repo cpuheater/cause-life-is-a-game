@@ -26,7 +26,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts10-randomBiasedAI",
+    parser.add_argument('--gym-id', type=str, default="Microrts10-workerRushAI",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -92,7 +92,7 @@ args.num_envs = args.num_selfplay_envs + args.num_bot_envs
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-num_frames = 4
+num_frames = 6
 
 class VecMonitor(VecEnvWrapper):
     def __init__(self, venv):
@@ -144,23 +144,28 @@ class VecFrameStack(VecEnvWrapper):
                                        low.shape).to(device)
         observation_space = gym.spaces.Box(
             low=low, high=high, dtype=venv.observation_space.dtype)
-        VecEnvWrapper.__init__(self, venv, observation_space=observation_space)
+        VecEnvWrapper.__init__(self, venv)
+        self.mask = torch.Tensor([0.01, 0.05, 0.15, 0.3, 0.4, 1.0])
+        self.mask = self.mask.repeat(27, 1).T.flatten()
+        self.mask = self.mask[None, :, None, None]
 
     def step_wait(self):
         obs, rews, news, infos = self.venv.step_wait()
+        dupa = obs
+        ala = self.mask
         self.stacked_obs[:, :, :, :-self.shape_dim0] = \
             self.stacked_obs[:,: ,:, self.shape_dim0:].clone()
         for (i, new) in enumerate(news):
             if new:
                 self.stacked_obs[i] = 0
         self.stacked_obs[:, :, :, -self.shape_dim0:] = torch.Tensor(obs).to(device)
-        tmp = self.stacked_obs.permute((0, 3, 1, 2))
-        dupa = torch.arange(0.4, 1.1, 0.2)
-        dupa = dupa.repeat(27, 1).T.flatten()
-        dupa = dupa[None, :, None, None]
-        dupa = dupa * tmp
-        dupa = dupa.permute((0, 2, 3, 1))
-        return dupa, rews, news, infos
+        #tmp = self.stacked_obs.permute((0, 3, 1, 2))
+        obs = self.mask * self.stacked_obs.permute((0, 3, 1, 2))
+        obs_splitted = torch.split(obs, 27, 1)
+        obs = torch.stack(obs_splitted)
+        obs = torch.sum(obs, 0)
+        obs = obs.permute((0, 2, 3, 1))
+        return obs, rews, news, infos
 
     def reset(self):
         obs = self.venv.reset()
@@ -169,7 +174,7 @@ class VecFrameStack(VecEnvWrapper):
         else:
             self.stacked_obs.zero_()
         self.stacked_obs[:, :, :, -self.shape_dim0:] = torch.Tensor(obs).to(device)
-        return self.stacked_obs
+        return obs
 
     def close(self):
         self.venv.close()
@@ -280,18 +285,19 @@ class Agent(nn.Module):
         self.mapsize = mapsize
         h, w, c = envs.observation_space.shape
         self.encoder = nn.Sequential(
+            Scale(1/1.9),
             Transpose((0, 3, 1, 2)),
-            layer_init(nn.Conv2d(c, 32, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(27, 32, kernel_size=3, padding=1, stride=1)),
+            layer_init(nn.Conv2d(32, 32, kernel_size=3, padding=1, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1, stride=1)),
+            layer_init(nn.Conv2d(64, 64, kernel_size=3, padding=1, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)),
+            layer_init(nn.Conv2d(128, 128, kernel_size=3, padding=1, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(in_channels=64, out_channels=64, kernel_size=1, stride=1, padding=0))
         )
 
         self.actor = nn.Sequential(

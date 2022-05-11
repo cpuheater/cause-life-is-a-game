@@ -275,17 +275,17 @@ class Agent(nn.Module):
         h, w, c = envs.observation_space.shape
         self.encoder = nn.Sequential(
             Transpose((0, 3, 1, 2)),
-            layer_init(nn.Conv2d(c, 32, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(27 * num_frames, 32, kernel_size=3, padding=1, stride=1)),
+            layer_init(nn.Conv2d(32, 32, kernel_size=3, padding=1, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1, stride=1)),
+            layer_init(nn.Conv2d(64, 64, kernel_size=3, padding=1, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)),
+            layer_init(nn.Conv2d(128, 128, kernel_size=3, padding=1, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
+            layer_init(nn.Conv2d(in_channels=64, out_channels=64, kernel_size=1, stride=1, padding=0))
         )
 
         self.actor = nn.Sequential(
