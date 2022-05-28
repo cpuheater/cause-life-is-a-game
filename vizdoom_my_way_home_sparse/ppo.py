@@ -27,6 +27,7 @@ from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
+import vizdoom
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 
 if __name__ == "__main__":
@@ -34,7 +35,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="defend_the_center",
+    parser.add_argument('--gym-id', type=str, default="my_way_home_sparse",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -104,7 +105,7 @@ args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
 
 class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
+    def __init__(self, seed, game_file, render=True, reward_scale=0.1, frame_skip=4):
         # assign observation space
         channel_num = 3
 
@@ -112,9 +113,22 @@ class ViZDoomEnv:
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
         self.reward_scale = reward_scale
         game = DoomGame()
-        game.load_config(f"./scenarios/{game_config}.cfg")
+        game.set_doom_scenario_path(f"./scenarios/{game_file}.wad")
+        game.set_doom_map("map01")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
+
+        game.add_available_button(vizdoom.Button.MOVE_FORWARD)
+        game.add_available_button(vizdoom.Button.TURN_LEFT)
+        game.add_available_button(vizdoom.Button.TURN_RIGHT)
+        # Causes episodes to finish after 200 tics (actions)
+        game.set_episode_timeout(2100)
+        # Makes the window appear (turned on by default)
+        game.set_window_visible(False)
+        # Sets the living reward (for each move) to -1
+        game.set_living_reward(-0.0001)
+        # Sets ViZDoom mode (PLAYER, ASYNC_PLAYER, SPECTATOR, ASYNC_SPECTATOR, PLAYER mode is default)
+        game.set_mode(vizdoom.Mode.PLAYER)
 
         num_buttons = game.get_available_buttons_size()
         self.action_space = Discrete(num_buttons)
