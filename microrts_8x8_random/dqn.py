@@ -27,7 +27,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Microrts4-randomBiasedAI",
+    parser.add_argument('--gym-id', type=str, default="Hopper-v2",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=1e-4,
                         help='the learning rate of the optimizer')
@@ -96,7 +96,7 @@ env = MicroRTSGridModeVecEnv(
     max_steps=1200,
     render_theme=2,
     ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
-    map_paths=["maps/4x4/basesWorkers4x4.xml"],
+    map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 
@@ -109,10 +109,7 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 env.action_space.seed(args.seed)
 env.observation_space.seed(args.seed)
-mapsize = 4 * 4
-action_space_list = env.action_plane_space.nvec.tolist()
-action_space_list[-1] = mapsize
-
+mapsize = 8 * 8
 # respect the default timelimit
 #assert isinstance(env.action_space, Continous), "only discrete action space is supported"
 if args.capture_video:
@@ -154,20 +151,24 @@ class QNetwork(nn.Module):
     def __init__(self, env):
         super(QNetwork, self).__init__()
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=2, stride=2)),
+            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(32, 32)),
-            nn.ReLU(),
-            nn.Linear(32, mapsize * sum(action_space_list))
-        )
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU())
+
+        self.v = nn.Linear(128, 1)
+        self.a_heads = nn.ModuleList([nn.Linear(128, mapsize * n) for n in env.action_plane_space.nvec.tolist()])
 
     def forward(self, x, device):
         x = torch.Tensor(x).to(device)
         x = self.network(x.permute((0, 3, 1, 2)))
-        return x
+        v = self.v(x)
+        a_list = [h(x) for h in self.a_heads]
+        q = [v.repeat(1, 64).unsqueeze(2) + a.view(x.shape[0], mapsize, -1) - a.view(x.shape[0], mapsize, -1).mean(-1, keepdim=True) for a in a_list]
+        return q
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
@@ -182,9 +183,6 @@ loss_fn = nn.MSELoss()
 print(device.__repr__())
 print(q_network)
 
-action_space_list = env.action_plane_space.nvec.tolist()
-action_space_list[-1] = mapsize
-
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
 episode_reward = 0
@@ -194,14 +192,13 @@ for global_step in range(args.total_timesteps):
     env.render()
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     invalid_action_masks = torch.tensor(np.array(env.get_action_mask())).to(device)
-    invalid_action_masks = invalid_action_masks[:, :, :78 - 49 + 16]
     if random.random() < epsilon:
         logits = torch.randn(invalid_action_masks.shape).to(device).squeeze(0)
-        logits = torch.split(logits, action_space_list, dim=1)
+        logits = torch.split(logits, env.action_plane_space.nvec.tolist(), dim=1)
     else:
         logits = q_network.forward(obs, device)
-    split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, sum(action_space_list)), action_space_list, dim=1)
-    logits_masked = [torch.where(masks.bool(), l.squeeze(0), torch.tensor(-1e8).to(device)) for l, masks in zip(logits, split_invalid_action_masks)]
+    split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
+    logits_masked = [torch.where(masks.bool(), l.squeeze(0), torch.tensor(float("-inf")).to(device)) for l, masks in zip(logits, split_invalid_action_masks)]
     action = np.array([torch.argmax(l, dim=1).cpu().numpy() for l in logits_masked]).transpose()
 
     # TRY NOT TO MODIFY: execute the game and log data.
@@ -218,12 +215,12 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones, invalid_action_masks = rb.sample(args.batch_size)
         with torch.no_grad():
-            split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, sum(action_space_list)), action_space_list, dim=1)
+            split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
             q = q_network.forward(s_next_obses, device)
             max_action = [torch.argmax(torch.where(masks.view_as(q).bool(), q, torch.tensor(float("-inf")).to(device)), dim=2) for q, masks in zip(q, split_invalid_action_masks)]
             target_q_next = target_network.forward(s_next_obses, device)
             target_max = [q.gather(1, m_a.unsqueeze(2)) for q, m_a in zip(target_q_next, max_action)]
-            target_q = torch.stack([torch.Tensor(s_rewards).to(device).repeat(1, 16) + args.gamma * t_m.squeeze(2) * ((1 - torch.Tensor(s_dones).to(device)).repeat(1, 16)) for t_m in target_max]).view(-1, mapsize, 7)
+            target_q = torch.stack([torch.Tensor(s_rewards).to(device).repeat(1, 64) + args.gamma * t_m.squeeze(2) * ((1 - torch.Tensor(s_dones).to(device)).repeat(1, 64)) for t_m in target_max]).view(-1, mapsize, 7)
         curr_q = torch.stack([q.gather(2, a.unsqueeze(1)) for q, a in zip(q_network.forward(s_obs, device), torch.LongTensor(s_actions).to(device).view(-1, 7).T.view(7, -1, mapsize))]).unsqueeze(2).view(-1, mapsize, 7)
         loss = loss_fn(target_q.view(-1, 7), curr_q.view(-1, 7))
 
