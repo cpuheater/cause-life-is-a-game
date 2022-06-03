@@ -21,13 +21,14 @@ from gym.spaces import MultiDiscrete
 import time
 import random
 import os
+from torch.distributions.categorical import Categorical
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='DQN agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="Hopper-v2",
+    parser.add_argument('--gym-id', type=str, default="Microrts8-randomAI",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=1e-4,
                         help='the learning rate of the optimizer')
@@ -69,7 +70,7 @@ if __name__ == "__main__":
                         help="the ending epsilon for exploration")
     parser.add_argument('--exploration-fraction', type=float, default=0.8,
                         help="the fraction of `total-timesteps` it takes from start-e to go end-e")
-    parser.add_argument('--learning-starts', type=int, default=32,
+    parser.add_argument('--learning-starts', type=int, default=10000,
                         help="timestep to start learning")
     parser.add_argument('--train-frequency', type=int, default=1,
                         help="the frequency of training")
@@ -95,7 +96,7 @@ env = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=1200,
     render_theme=2,
-    ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.randomAI for _ in range(args.num_bot_envs)],
     map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
@@ -136,10 +137,10 @@ class ReplayBuffer():
             done_mask_lst.append(done_mask)
             invalid_mask_lst.append(invalid_mask)
 
-        return np.array(s_lst), np.array(a_lst), \
+        return np.array(s_lst), np.stack(a_lst), \
                np.array(r_lst), np.array(s_prime_lst), \
                np.array(done_mask_lst), \
-               torch.stack(invalid_mask_lst)
+               np.array(invalid_mask_lst)
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -157,18 +158,23 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Flatten(),
             layer_init(nn.Linear(128, 128)),
-            nn.ReLU())
+            nn.ReLU(),
+            nn.Linear(128, mapsize * env.action_plane_space.nvec.sum()))
 
-        self.v = nn.Linear(128, 1)
-        self.a_heads = nn.ModuleList([nn.Linear(128, mapsize * n) for n in env.action_plane_space.nvec.tolist()])
+    def forward(self, x):
+        x = torch.Tensor(x)
+        logits = self.network(x.permute((0, 3, 1, 2)))
+        split_logits = torch.split(logits.view(-1, sum(env.action_plane_space.nvec.tolist())), env.action_plane_space.nvec.tolist(), dim=1)
+        return split_logits
 
-    def forward(self, x, device):
-        x = torch.Tensor(x).to(device)
-        x = self.network(x.permute((0, 3, 1, 2)))
-        v = self.v(x)
-        a_list = [h(x) for h in self.a_heads]
-        q = [v.repeat(1, 64).unsqueeze(2) + a.view(x.shape[0], mapsize, -1) - a.view(x.shape[0], mapsize, -1).mean(-1, keepdim=True) for a in a_list]
-        return q
+    def get_action(self, x, invalid_action_masks=None):
+        split_logits = self.forward(x)
+        split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
+        split_logits_masked = [torch.where(masks.bool(), l.squeeze(0), torch.tensor(-1e8).to(device)) for l, masks in zip(split_logits, split_invalid_action_masks)]
+        action = torch.stack([categorical.argmax(1) for categorical in split_logits_masked])
+        action = action.T.view(-1, 64, len(env.action_plane_space.nvec))
+        return action, split_logits_masked
+
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
@@ -191,16 +197,14 @@ for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     env.render()
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
-    invalid_action_masks = torch.tensor(np.array(env.get_action_mask())).to(device)
+    invalid_action_masks = torch.Tensor(np.array(env.get_action_mask())).to(device)
     if random.random() < epsilon:
-        logits = torch.randn(invalid_action_masks.shape).to(device).squeeze(0)
-        logits = torch.split(logits, env.action_plane_space.nvec.tolist(), dim=1)
+        split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
+        split_invalid_action_masks_categorical = [Categorical(logits=logits) for logits in split_invalid_action_masks]
+        action = torch.stack([categorical.sample() for categorical in split_invalid_action_masks_categorical])
+        action = action.T.view(-1, 64, len(env.action_plane_space.nvec))
     else:
-        logits = q_network.forward(obs, device)
-    split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
-    logits_masked = [torch.where(masks.bool(), l.squeeze(0), torch.tensor(float("-inf")).to(device)) for l, masks in zip(logits, split_invalid_action_masks)]
-    action = np.array([torch.argmax(l, dim=1).cpu().numpy() for l in logits_masked]).transpose()
-
+        action, _ = q_network.get_action(obs, invalid_action_masks = invalid_action_masks)
     # TRY NOT TO MODIFY: execute the game and log data.
     try:
         next_obs, reward, done, infos = env.step(action.reshape(1, -1))
@@ -209,20 +213,18 @@ for global_step in range(args.total_timesteps):
         raise
 
     episode_reward += reward
-
+    invalid_action_masks = np.array(env.get_action_mask())
     # ALGO LOGIC: training.
-    rb.put((obs.squeeze(0), action, reward, next_obs.squeeze(0), done, invalid_action_masks.squeeze(0)))
+    rb.put((obs.squeeze(0), action.squeeze(0), reward, next_obs.squeeze(0), done, invalid_action_masks.squeeze(0)))
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
-        s_obs, s_actions, s_rewards, s_next_obses, s_dones, invalid_action_masks = rb.sample(args.batch_size)
+        b_obs, b_actions, b_rewards, b_next_obses, b_dones, b_invalid_action_masks = rb.sample(args.batch_size)
         with torch.no_grad():
-            split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
-            q = q_network.forward(s_next_obses, device)
-            max_action = [torch.argmax(torch.where(masks.view_as(q).bool(), q, torch.tensor(float("-inf")).to(device)), dim=2) for q, masks in zip(q, split_invalid_action_masks)]
-            target_q_next = target_network.forward(s_next_obses, device)
-            target_max = [q.gather(1, m_a.unsqueeze(2)) for q, m_a in zip(target_q_next, max_action)]
-            target_q = torch.stack([torch.Tensor(s_rewards).to(device).repeat(1, 64) + args.gamma * t_m.squeeze(2) * ((1 - torch.Tensor(s_dones).to(device)).repeat(1, 64)) for t_m in target_max]).view(-1, mapsize, 7)
-        curr_q = torch.stack([q.gather(2, a.unsqueeze(1)) for q, a in zip(q_network.forward(s_obs, device), torch.LongTensor(s_actions).to(device).view(-1, 7).T.view(7, -1, mapsize))]).unsqueeze(2).view(-1, mapsize, 7)
-        loss = loss_fn(target_q.view(-1, 7), curr_q.view(-1, 7))
+            _, split_logits_masked = target_network.get_action(b_next_obses, invalid_action_masks=torch.Tensor(b_invalid_action_masks))
+            target_max = torch.stack([l.view(-1, mapsize, l.shape[1]).max(2)[0].sum(1) for l in split_logits_masked]).sum(0) / len(env.action_space.nvec.tolist())
+            td_target = torch.Tensor(b_rewards.flatten()).to(device) + args.gamma * target_max * (1 - torch.Tensor(b_dones.flatten()).to(device))
+        split_curr_q = q_network.forward(b_obs)
+        curr_q = torch.stack([q.gather(1, a.unsqueeze(1)).flatten() for q, a in zip(split_curr_q, torch.LongTensor(b_actions).to(device).reshape(-1, 7).T)]).T.view(-1, mapsize, 7)
+        loss = loss_fn(td_target, curr_q.sum(1).sum(1))
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
