@@ -179,7 +179,7 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.randomBiasedAI for _ in range(args.num_bot_envs)],
+    ai2s=[microrts_ai.passiveAI for _ in range(args.num_bot_envs)],
     map_paths=["maps/4x4/basesWorkers4x4.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
