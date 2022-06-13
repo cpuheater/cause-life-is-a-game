@@ -35,7 +35,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="my_way_home_sparse",
+    parser.add_argument('--gym-id', type=str, default="my_way_home_dense",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -113,20 +113,19 @@ class ViZDoomEnv:
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
         self.reward_scale = reward_scale
         game = DoomGame()
-        game.set_doom_scenario_path(f"./scenarios/{game_file}.wad")
-        game.set_doom_map("map01")
+        game.load_config(f"./scenarios/{game_file}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
 
-        game.add_available_button(vizdoom.Button.MOVE_FORWARD)
-        game.add_available_button(vizdoom.Button.TURN_LEFT)
-        game.add_available_button(vizdoom.Button.TURN_RIGHT)
+        #game.add_available_button(vizdoom.Button.MOVE_FORWARD)
+        #game.add_available_button(vizdoom.Button.TURN_LEFT)
+        #game.add_available_button(vizdoom.Button.TURN_RIGHT)
         # Causes episodes to finish after 200 tics (actions)
-        game.set_episode_timeout(2100)
+        #game.set_episode_timeout(2100)
         # Makes the window appear (turned on by default)
-        game.set_window_visible(False)
+        #game.set_window_visible(False)
         # Sets the living reward (for each move) to -1
-        game.set_living_reward(-0.0001)
+        #game.set_living_reward(-0.0001)
         # Sets ViZDoom mode (PLAYER, ASYNC_PLAYER, SPECTATOR, ASYNC_SPECTATOR, PLAYER mode is default)
         game.set_mode(vizdoom.Mode.PLAYER)
 

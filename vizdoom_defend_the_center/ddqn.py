@@ -52,11 +52,11 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--learning-rate', type=float, default=0.00025,
+    parser.add_argument('--learning-rate', type=float, default=0.0005,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=2,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=100000,
+    parser.add_argument('--total-timesteps', type=int, default=1000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -72,11 +72,11 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
 
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=10000,
+    parser.add_argument('--buffer-size', type=int, default=100000,
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
-    parser.add_argument('--target-network-frequency', type=int, default=1000,
+    parser.add_argument('--target-network-frequency', type=int, default=100,
                         help="the timesteps it takes to update the target network")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
@@ -92,6 +92,9 @@ if __name__ == "__main__":
                         help="timestep to start learning")
     parser.add_argument('--train-frequency', type=int, default=4,
                         help="the frequency of training")
+    parser.add_argument('--scale-reward', type=float, default=0.0005,
+                        help='scale reward')
+
     args = parser.parse_args()
     #if not args.seed:
     args.seed = int(time.time())
@@ -111,9 +114,11 @@ device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cp
 frame_repeat = 4
 resolution = (60, 80)
 frames = 3
-game = initialize_vizdoom("./scenarios/basic.cfg")
+game = initialize_vizdoom("./scenarios/defend_the_center.cfg")
 n = game.get_available_buttons_size()
 actions = [list(a) for a in itertools.product([0, 1], repeat=n)]
+actions.remove([True, True, True])
+actions.remove([True, True, False])
 
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -162,7 +167,7 @@ class QNetwork(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(1536, len(actions))
+            layer_init(nn.Linear(1536, len(actions)))
         )
 
     def forward(self, x):
@@ -188,6 +193,8 @@ game.new_episode()
 episode_reward = 0
 obs = game.get_state().screen_buffer
 obs = preprocess(obs, resolution)
+episode_length = 0
+episode_reward = 0
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
@@ -199,7 +206,7 @@ for global_step in range(args.total_timesteps):
 
     # TRY NOT TO MODIFY: execute the game and log data.
     reward = game.make_action(actions[action], frame_repeat)
-    reward *= 0.01
+    reward *= args.scale_reward
     done = game.is_episode_finished()
     episode_reward += reward
     next_obs = preprocess(np.zeros((3, resolution[0], resolution[1])), resolution) if done else preprocess(game.get_state().screen_buffer, resolution)
@@ -207,6 +214,7 @@ for global_step in range(args.total_timesteps):
     if done:
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/epsilon", epsilon, global_step)
+        writer.add_scalar("charts/episode_length", episode_length, global_step)
 
     rb.put((obs, action, reward, next_obs, done))
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
@@ -229,14 +237,15 @@ for global_step in range(args.total_timesteps):
         # update the target network
         if global_step % args.target_network_frequency == 0:
             target_network.load_state_dict(q_network.state_dict())
-
     # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
     if done:
         game.new_episode()
         obs, episode_reward = game.get_state().screen_buffer, 0
         obs = preprocess(obs, resolution)
+        episode_length = 0
     else:
         obs = next_obs
+        episode_length += 1
 
 
 writer.close()

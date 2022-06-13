@@ -96,8 +96,8 @@ env = MicroRTSGridModeVecEnv(
     num_bot_envs=args.num_bot_envs,
     max_steps=1200,
     render_theme=2,
-    ai2s=[microrts_ai.randomAI for _ in range(args.num_bot_envs)],
-    map_paths=["maps/8x8/basesWorkers8x8.xml"],
+    ai2s=[microrts_ai.passiveAI for _ in range(args.num_bot_envs)],
+    map_paths=["maps/4x4/basesWorkers4x4.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
 )
 
@@ -110,7 +110,7 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 env.action_space.seed(args.seed)
 env.observation_space.seed(args.seed)
-mapsize = 8 * 8
+mapsize = 4 * 4
 # respect the default timelimit
 #assert isinstance(env.action_space, Continous), "only discrete action space is supported"
 if args.capture_video:
@@ -152,14 +152,14 @@ class QNetwork(nn.Module):
     def __init__(self, env):
         super(QNetwork, self).__init__()
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+            layer_init(nn.Conv2d(27, 16, kernel_size=2, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=2)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(128, 128)),
+            layer_init(nn.Linear(32, 32)),
             nn.ReLU(),
-            nn.Linear(128, mapsize * env.action_plane_space.nvec.sum()))
+            layer_init(nn.Linear(32, mapsize * env.action_plane_space.nvec.sum())))
 
     def forward(self, x):
         x = torch.Tensor(x)
@@ -172,7 +172,7 @@ class QNetwork(nn.Module):
         split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
         split_logits_masked = [torch.where(masks.bool(), l.squeeze(0), torch.tensor(-1e8).to(device)) for l, masks in zip(split_logits, split_invalid_action_masks)]
         action = torch.stack([categorical.argmax(1) for categorical in split_logits_masked])
-        action = action.T.view(-1, 64, len(env.action_plane_space.nvec))
+        action = action.T.view(-1, 16, len(env.action_plane_space.nvec))
         return action, split_logits_masked
 
 
@@ -202,7 +202,7 @@ for global_step in range(args.total_timesteps):
         split_invalid_action_masks = torch.split(invalid_action_masks.view(-1, env.action_plane_space.nvec.sum()), env.action_plane_space.nvec.tolist(), dim=1)
         split_invalid_action_masks_categorical = [Categorical(logits=logits) for logits in split_invalid_action_masks]
         action = torch.stack([categorical.sample() for categorical in split_invalid_action_masks_categorical])
-        action = action.T.view(-1, 64, len(env.action_plane_space.nvec))
+        action = action.T.view(-1, 16, len(env.action_plane_space.nvec))
     else:
         action, _ = q_network.get_action(obs, invalid_action_masks = invalid_action_masks)
     # TRY NOT TO MODIFY: execute the game and log data.
@@ -212,6 +212,8 @@ for global_step in range(args.total_timesteps):
         e.printStackTrace()
         raise
 
+    if reward.item() > 0:
+        print(f"reward: ${reward}")
     episode_reward += reward
     invalid_action_masks = np.array(env.get_action_mask())
     # ALGO LOGIC: training.
@@ -220,7 +222,7 @@ for global_step in range(args.total_timesteps):
         b_obs, b_actions, b_rewards, b_next_obses, b_dones, b_invalid_action_masks = rb.sample(args.batch_size)
         with torch.no_grad():
             _, split_logits_masked = target_network.get_action(b_next_obses, invalid_action_masks=torch.Tensor(b_invalid_action_masks))
-            target_max = torch.stack([l.view(-1, mapsize, l.shape[1]).max(2)[0].sum(1) for l in split_logits_masked]).sum(0) / len(env.action_space.nvec.tolist())
+            target_max = torch.stack([l.view(-1, mapsize, l.shape[1]).max(2)[0].sum(1) for l in split_logits_masked]).sum(0)
             td_target = torch.Tensor(b_rewards.flatten()).to(device) + args.gamma * target_max * (1 - torch.Tensor(b_dones.flatten()).to(device))
         split_curr_q = q_network.forward(b_obs)
         curr_q = torch.stack([q.gather(1, a.unsqueeze(1)).flatten() for q, a in zip(split_curr_q, torch.LongTensor(b_actions).to(device).reshape(-1, 7).T)]).T.view(-1, mapsize, 7)
@@ -232,6 +234,7 @@ for global_step in range(args.total_timesteps):
         # optimize the midel
         optimizer.zero_grad()
         loss.backward()
+        print(q_network.network[7].weight.grad)
         nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
         optimizer.step()
 

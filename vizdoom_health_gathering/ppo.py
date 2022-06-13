@@ -10,35 +10,13 @@ import skimage.transform
 
 cv2.ocl.setUseOpenCL(False)
 
-
-class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
-
-    def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.uint8,
-        )
-
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
-
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
+from vizdoom import Button
 import argparse
 from distutils.util import strtobool
 import numpy as np
@@ -50,6 +28,8 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import typing as t
+import itertools
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -76,7 +56,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=0.01,
+    parser.add_argument('--scale-reward', type=float, default=0.0005,
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
@@ -101,21 +81,21 @@ if __name__ == "__main__":
     parser.add_argument('--clip-coef', type=float, default=0.1,
                         help="the surrogate clipping coefficient")
     parser.add_argument('--update-epochs', type=int, default=4,
-                         help="the K epochs to update the policy")
+                        help="the K epochs to update the policy")
     parser.add_argument('--kle-stop', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                         help='If toggled, the policy updates will be early stopped w.r.t target-kl')
+                        help='If toggled, the policy updates will be early stopped w.r.t target-kl')
     parser.add_argument('--kle-rollback', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                         help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
+                        help='If toggled, the policy updates will roll back to previous policy if KL exceeds target-kl')
     parser.add_argument('--target-kl', type=float, default=0.03,
-                         help='the target-kl variable that is referred by --kl')
+                        help='the target-kl variable that is referred by --kl')
     parser.add_argument('--gae', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                         help='Use GAE for advantage computation')
+                        help='Use GAE for advantage computation')
     parser.add_argument('--norm-adv', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help="Toggles advantages normalization")
+                        help="Toggles advantages normalization")
     parser.add_argument('--anneal-lr', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help="Toggle learning rate annealing for policy and value networks")
+                        help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
-                          help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+                        help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
     args = parser.parse_args()
     #if not args.seed:
@@ -130,25 +110,23 @@ class ViZDoomEnv:
         # assign observation space
         channel_num = 3
 
-        self.observation_shape = (channel_num, 84, 84)
+        self.observation_shape = (channel_num, 60, 80)
         self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
         self.reward_scale = reward_scale
         game = DoomGame()
-
         game.load_config(f"./scenarios/{game_config}.cfg")
         game.set_screen_resolution(ScreenResolution.RES_160X120)
         game.set_screen_format(ScreenFormat.CRCGCB)
 
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
+        #self.actions = get_available_actions(np.array(game.get_available_buttons()))
+        self.actions = [list(a) for a in itertools.product([0, 1], repeat=game.get_available_buttons_size())]
+        self.actions.remove([True, True, True])
+        self.actions.remove([True, True, False])
+        self.action_space = spaces.Discrete(len(self.actions))
+
         self.frame_skip = frame_skip
 
         game.set_seed(seed)
-        random.seed(seed)
         game.set_window_visible(render)
         game.init()
 
@@ -156,34 +134,23 @@ class ViZDoomEnv:
 
     def get_current_input(self):
         state = self.game.get_state()
-
         res_source = []
         res_source.append(state.screen_buffer)
-
         res = np.vstack(res_source)
         res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
         self.last_input = res
         return res
 
-    def step_with_skip(self, action):
-        reward_acc = 0
-        ob = self.last_input
-
-        for i in range(self.frame_skip + 1):
-            reward = self.game.make_action(self.actions[action])
-            reward_acc += reward
-            done = self.game.is_episode_finished()
-
-            if done:
-                break
-            else:
-                ob = self.get_current_input()
-
-        return ob, reward_acc, done
-
     def step(self, action):
         info = {}
-        ob, reward, done = self.step_with_skip(action)
+        reward = self.game.make_action(self.actions[action], self.frame_skip)
+        done = self.game.is_episode_finished()
+        if done:
+            ob = self.last_input
+        else:
+            self.game_variables = self.game.get_state().game_variables
+            info["game_variables"] = self.game_variables
+            ob = self.get_current_input()
         # reward scaling
         reward = reward * self.reward_scale
         self.total_reward += reward
@@ -192,6 +159,7 @@ class ViZDoomEnv:
         if done:
             info['reward'] = self.total_reward
             info['length'] = self.total_length
+            info["game_variables"] = self.game_variables
 
         return ob, reward, done, info
 
@@ -204,6 +172,23 @@ class ViZDoomEnv:
 
     def close(self):
         self.game.close()
+
+
+
+
+def shape_reward(r_t, misc, prev_misc):
+    # Check any kill count
+    if (misc[0] > prev_misc[0]):
+        r_t = r_t + 1
+
+    if (misc[1] < prev_misc[1]): # Use ammo
+        r_t = r_t - 0.1
+
+    if (misc[2] < prev_misc[2]): # Loss HEALTH
+        r_t = r_t - 0.1
+
+    return r_t
+
 
 
 class VecPyTorch(VecEnvWrapper):
@@ -230,7 +215,7 @@ class VecPyTorch(VecEnvWrapper):
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
-        '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+    '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
@@ -253,9 +238,9 @@ def make_env(seed):
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 # if args.prod_mode:
 envs = VecPyTorch(
-         SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-         device
-     )
+    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
+    device
+)
 assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
@@ -284,7 +269,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(3136, 512)),
+            layer_init(nn.Linear(1536, 512)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
@@ -351,10 +336,16 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
+        #for info in infos:
+        #    if 'episode' in info.keys():
+        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+        #        break
         for info in infos:
             if 'reward' in info.keys():
                 writer.add_scalar("charts/episode_reward", info['reward'], global_step)
-            if 'Episode_Total_Len' in info.keys():
+            if 'length' in info.keys():
+                print(f"length: {info['length']} game_variables: {info['game_variables']}")
                 writer.add_scalar("charts/episode_length", info['length'], global_step)
 
     # bootstrap reward if not done. reached the batch limit
@@ -436,13 +427,6 @@ for update in range(1, num_updates+1):
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
-        if args.kle_stop:
-            if approx_kl > args.target_kl:
-                break
-        if args.kle_rollback:
-            if (b_logprobs[minibatch_ind] - agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])[1]).mean() > args.target_kl:
-                agent.load_state_dict(target_agent.state_dict())
-                break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
