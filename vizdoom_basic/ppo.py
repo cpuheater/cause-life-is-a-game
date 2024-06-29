@@ -129,6 +129,8 @@ np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
+import vizdoom.vizdoom as vzd
+
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
@@ -136,7 +138,7 @@ def make_env(env_id, idx, capture_video, run_name):
             
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id)  
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.TransformReward(env, lambda r: r * args.scale_reward)
         return ObservationWrapper(env)
