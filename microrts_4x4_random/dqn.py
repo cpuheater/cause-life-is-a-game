@@ -234,7 +234,6 @@ for global_step in range(args.total_timesteps):
         # optimize the midel
         optimizer.zero_grad()
         loss.backward()
-        print(q_network.network[7].weight.grad)
         nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
         optimizer.step()
 

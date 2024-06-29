@@ -25,6 +25,7 @@ import random
 import os
 import itertools
 
+
 def initialize_vizdoom(config):
     game = DoomGame()
     game.load_config(config)
@@ -86,7 +87,7 @@ if __name__ == "__main__":
                         help="the starting epsilon for exploration")
     parser.add_argument('--end-e', type=float, default=0.02,
                         help="the ending epsilon for exploration")
-    parser.add_argument('--exploration-fraction', type=float, default=0.4,
+    parser.add_argument('--exploration-fraction', type=float, default=0.5,
                         help="the fraction of `total-timesteps` it takes from start-e to go end-e")
     parser.add_argument('--learning-starts', type=int, default=800,
                         help="timestep to start learning")
@@ -94,6 +95,8 @@ if __name__ == "__main__":
                         help="the frequency of training")
     parser.add_argument('--scale-reward', type=float, default=0.0005,
                         help='scale reward')
+    parser.add_argument('--n-step', type=int, default=3,
+                        help="n step")
 
     args = parser.parse_args()
     #if not args.seed:
@@ -112,7 +115,7 @@ if args.prod_mode:
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 frame_repeat = 4
-resolution = (60, 80)
+resolution = (80, 60)
 frames = 3
 game = initialize_vizdoom("./scenarios/health_gathering.cfg")
 n = game.get_available_buttons_size()
@@ -125,34 +128,56 @@ np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
-# modified from https://github.com/seungeunrho/minimalRL/blob/master/dqn.py#
-class ReplayBuffer():
-    def __init__(self, buffer_limit):
-        self.buffer = collections.deque(maxlen=buffer_limit)
+class ReplayBufferNStep(object):
+    def __init__(self, size, n_step, gamma):
+        self._storage = deque(maxlen=size)
+        self._maxsize = size
+        self.n_step_buffer = deque(maxlen=n_step)
+        self.gamma = gamma
+        self.n_step = n_step
 
-    def put(self, transition):
-        self.buffer.append(transition)
+    def __len__(self):
+        return len(self._storage)
 
-    def sample(self, n):
-        mini_batch = random.sample(self.buffer, n)
-        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
+    def get_n_step(self):
+        _, _, reward, next_observation, done = self.n_step_buffer[-1]
+        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
+            reward = self.gamma * reward * (1 - do) + r
+            mext_observation, done = (next_obs, do) if do else (next_observation, done)
+        return reward, next_observation, done
 
-        for transition in mini_batch:
-            s, a, r, s_prime, done_mask = transition
-            s_lst.append(s)
-            a_lst.append(a)
-            r_lst.append(r)
-            s_prime_lst.append(s_prime)
-            done_mask_lst.append(done_mask)
+    def append(self, obs, action, reward, next_obs, done):
+        self.n_step_buffer.append((obs, action, reward, next_obs, done))
+        if len(self.n_step_buffer) < self.n_step:
+            return
+        reward, next_obs, done = self.get_n_step()
+        obs, action, _, _, _ = self.n_step_buffer[0]
+        self._storage.append([obs, action, reward, next_obs, done])
 
-        return np.array(s_lst), np.array(a_lst), \
-               np.array(r_lst), np.array(s_prime_lst), \
-               np.array(done_mask_lst)
+    def sample(self, batch_size):
+        idxes = np.random.choice(len(self._storage), batch_size, replace=True)
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, reward, obs_tp1, done = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1, copy=False))
+            dones.append(done)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
+
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
+def layer_init2(layer, bias_const=1.0):
+    torch.nn.init.zeros_(layer.weight)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
@@ -179,7 +204,7 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
 
 
-rb = ReplayBuffer(args.buffer_size)
+rb = ReplayBufferNStep(args.buffer_size, 4, args.gamma)
 q_network = QNetwork(actions, frames).to(device)
 target_network = QNetwork(actions, frames).to(device)
 target_network.load_state_dict(q_network.state_dict())
@@ -206,17 +231,18 @@ for global_step in range(args.total_timesteps):
 
     # TRY NOT TO MODIFY: execute the game and log data.
     reward = game.make_action(actions[action], frame_repeat)
-    reward *= args.scale_reward
     done = game.is_episode_finished()
     episode_reward += reward
+
     next_obs = preprocess(np.zeros((3, resolution[0], resolution[1])), resolution) if done else preprocess(game.get_state().screen_buffer, resolution)
 
     if done:
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/epsilon", epsilon, global_step)
         writer.add_scalar("charts/episode_length", episode_length, global_step)
+        writer.add_scalar("charts/epsilon", epsilon, global_step)
 
-    rb.put((obs, action, reward, next_obs, done))
+    rb.append(obs, action, reward, next_obs, done)
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
@@ -228,7 +254,6 @@ for global_step in range(args.total_timesteps):
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
 
-        # optimize the midel
         optimizer.zero_grad()
         loss.backward()
         #nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
