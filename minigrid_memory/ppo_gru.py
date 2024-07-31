@@ -1,38 +1,7 @@
 # https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
 
 import numpy as np
-from collections import deque
-import gym
-from gym import spaces
-import cv2
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-import skimage.transform
-from gym_minigrid.wrappers import *
-cv2.ocl.setUseOpenCL(False)
-from matplotlib import pyplot as plt
-
-
-class ImageToPyTorch(gym.ObservationWrapper):
-    """
-    Image shape to channels x weight x height
-    """
-
-    def __init__(self, env):
-        super(ImageToPyTorch, self).__init__(env)
-        old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(old_shape[-1], old_shape[0], old_shape[1]),
-            dtype=np.uint8,
-        )
-
-    def observation(self, observation):
-        return np.transpose(observation, axes=(2, 0, 1))
-
-def wrap_pytorch(env):
-    return ImageToPyTorch(env)
-
+from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -43,23 +12,19 @@ from torch.utils.tensorboard import SummaryWriter
 import argparse
 from distutils.util import strtobool
 import numpy as np
-import gym
-from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
-from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import gymnasium as gym
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MiniGrid-MemoryS7-v0",
+    parser.add_argument('--env-id', type=str, default="MiniGrid-MemoryS7-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=9e-4,
+    parser.add_argument('--learning-rate', type=float, default=2e-3,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -71,7 +36,7 @@ if __name__ == "__main__":
                         help='if toggled, cuda will not be enabled by default')
     parser.add_argument('--prod-mode', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='run the script in production mode and use wandb to log outputs')
-    parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
+    parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
     parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
                         help="the wandb's project name")
@@ -126,66 +91,10 @@ if __name__ == "__main__":
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
-
-class InfoWrapper(gym.Wrapper):
-    def __init__(self, env):
-        gym.Wrapper.__init__(self, env)
-        self._rewards = []
-
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        self._rewards = []
-        return obs["image"]
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self._rewards.append(reward)
-        ## Retrieve the RGB frame of the agent's vision
-        vis_obs = obs["image"]
-
-        ## Render the environment in realtime
-        #if self._realtime_mode:
-        #    self._env.render(tile_size=96)
-        #    time.sleep(0.5)
-
-        # Wrap up episode information once completed (i.e. done)
-        if done:
-            print(f"rewards: {sum(self._rewards)}")
-            info = {"reward": sum(self._rewards),
-                    "length": len(self._rewards)}
-
-        return vis_obs, reward, done, info
-
-class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84):
-        super().__init__(env)
-        self.observation_space = env.observation_space.spaces['image']
-
-    def observation(self, obs):
-        return obs
-
-class VecPyTorch(VecEnvWrapper):
-    def __init__(self, venv, device):
-        super(VecPyTorch, self).__init__(venv)
-        self.device = device
-
-    def reset(self):
-        obs = self.venv.reset()
-        obs = torch.from_numpy(obs).float().to(self.device)
-        return obs
-
-    def step_async(self, actions):
-        actions = actions.cpu().numpy()
-        self.venv.step_async(actions)
-
-    def step_wait(self):
-        obs, reward, done, info = self.venv.step_wait()
-        obs = torch.from_numpy(obs).float().to(self.device)
-        reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
-        return obs, reward, done, info
+start_time = time.time()
 
 # TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
     '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
@@ -200,25 +109,35 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
-def make_env(seed):
+class ObservationWrapper(gym.ObservationWrapper):
+
+    def __init__(self, env):
+        super().__init__(env)        
+        w, h, num_channels = env.observation_space["image"].shape
+        new_shape = (num_channels, w, h)        
+        self.observation_space = gym.spaces.Box(0, 255, shape=new_shape, dtype=np.float32)
+
+    def observation(self, observation):        
+        observation = observation['image'].astype('float32')        
+        return np.transpose(observation,(2,0,1))
+    
+    
+def make_env(env_id, idx, capture_video, run_name):
     def thunk():
-        env = gym.make(args.gym_id)
-        env = InfoWrapper(env)
-        env = WarpFrame(env)
-        env = wrap_pytorch(env)
-        env.seed(seed)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
-        return env
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id)
+        env = gym.wrappers.RecordEpisodeStatistics(env)        
+        return ObservationWrapper(env)
     return thunk
 
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
-# if args.prod_mode:
-envs = VecPyTorch(
-    SubprocVecEnv([make_env(args.seed+i) for i in range(args.num_envs)], "fork"),
-    device
-)
-assert isinstance(envs.action_space, Discrete), "only discrete action space is supported"
+envs = gym.vector.AsyncVectorEnv(
+        [make_env(args.env_id, i, args.capture_video, experiment_name) for i in range(args.num_envs)],
+    )
+assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
 class Scale(nn.Module):
@@ -261,7 +180,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(980, rnn_input_size))
         )
 
-        self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size, batch_first=True)
+        self.rnn = nn.GRU(rnn_input_size, rnn_hidden_size, batch_first=True)
         for name, param in self.rnn.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)
@@ -296,7 +215,7 @@ class Agent(nn.Module):
         x, _ = self.forward(x, rnn_state)
         return self.critic(x)
 
-def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states):
+def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states):
 
     # Supply training samples
     samples = {
@@ -307,8 +226,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         'advantages': advantages.permute(1, 0).cpu().numpy(),
         'returns': returns.permute(1, 0).cpu().numpy(),
         'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32),
-        "hxs": rnn_hidden_states.permute(1, 0, 2).cpu().numpy(),
-        "cxs": cell_hidden_states.permute(1, 0, 2).cpu().numpy()
+        "hxs": rnn_hidden_states.permute(1, 0, 2).cpu().numpy()
     }
 
     max_sequence_length = 1
@@ -345,7 +263,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
 
         # Stack episodes (target shape: (Episode, Step, Data ...) & apply data to the samples dict
         samples[key] = np.stack(sequences, axis=0)
-        if (key == "hxs" or key == "cxs"):
+        if (key == "hxs"):
             # Select the very first recurrent cell state of a sequence and add it to the samples
             samples[key] = samples[key][:, 0]
 
@@ -356,7 +274,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
     # Flatten all samples
     samples_flat = {}
     for key, value in samples.items():
-        if (not key == "hxs" and not key == "cxs"):
+        if (not key == "hxs"):
             value = value.reshape(value.shape[0] * value.shape[1], *value.shape[2:])
         samples_flat[key] = torch.tensor(value, dtype=torch.float32, device=device)
 
@@ -379,7 +297,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         mini_batch_indices = indices[sequence_indices[start:end]].reshape(-1)
         mini_batch = {}
         for key, value in samples_flat.items():
-            if key != "hxs" and key != "cxs":
+            if key != "hxs":
                 mini_batch[key] = value[mini_batch_indices].to(device)
             else:
                 # Collect recurrent cell states
@@ -408,30 +326,30 @@ def pad_sequence(sequence, target_length):
     return np.concatenate((sequence, padding), axis=0)
 
 rnn_hidden_size = args.rnn_hidden_size
-agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=args.rnn_hidden_size).to(device)
+agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=526).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
-obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
+obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
-rnn_cell_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
-next_obs = envs.reset()
+next_obs, _ = envs.reset()
+next_obs = torch.Tensor(next_obs).to(device)
 next_done = torch.zeros(args.num_envs).to(device)
 rnn_hidden_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
-rnn_cell_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
 num_updates = args.total_timesteps // args.batch_size
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
@@ -445,34 +363,35 @@ for update in range(1, num_updates+1):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
-        rnn_hidden_states[step] = rnn_hidden_state
-        rnn_cell_states[step] = rnn_cell_state
+        rnn_hidden_states[step] = rnn_hidden_state        
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state))
+            value, rnn_hidden_state, action, logproba, _ = agent.get_action(obs[step], rnn_hidden_state)
 
         values[step] = value.flatten()
         actions[step] = action
         logprobs[step] = logproba
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rs, ds, infos = envs.step(action)
-        rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
+        next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+        next_done = np.logical_or(terminations, truncations)
+        rewards[step] = torch.tensor(reward).to(device).view(-1)        
+        next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
         rnn_hidden_state = rnn_hidden_state * mask
-        rnn_cell_state = rnn_cell_state * mask
-        for info in infos:
-            if info and 'reward' in info.keys():
-                index = torch.nonzero(next_done)[0].item()
-                episode_done_indices[index].append(step)
-                writer.add_scalar("charts/episode_reward", info['reward'], global_step)
-            if info and 'length' in info.keys():
-                writer.add_scalar("charts/episode_length", info['length'], global_step)
+        
+
+        if "final_info" in infos:
+            for info in infos["final_info"]:
+                if info and "episode" in info:
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                    writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                    writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), rnn_hidden_state).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -501,16 +420,16 @@ for update in range(1, num_updates+1):
     # Optimizaing the policy and value network
     for i_epoch_pi in range(args.update_epochs):
         data_generator = recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns,
-                                             rnn_hidden_states, rnn_cell_states)
+                                             rnn_hidden_states)
         for batch in data_generator:
-            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
+            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
                                                                                                                                    batch['values'], batch['returns'], \
                                                                                                                                    batch['log_probs'], batch['advantages'], \
-                                                                                                                                   batch["hxs"], batch["cxs"], batch["loss_mask"]
+                                                                                                                                   batch["hxs"], batch["loss_mask"]
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
+            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, b_rnn_hidden_states.unsqueeze(0),
                                                                      sequence_length=args.seq_length, action=b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 
@@ -554,6 +473,7 @@ for update in range(1, num_updates+1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)        
 
 envs.close()
 writer.close()

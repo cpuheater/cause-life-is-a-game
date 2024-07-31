@@ -81,6 +81,7 @@ if __name__ == "__main__":
 
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
+start_time = time.time()
 run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
 # TRY NOT TO MODIFY: setup the environment
@@ -302,6 +303,7 @@ for update in range(1, num_updates+1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)      
 
 envs.close()
 writer.close()

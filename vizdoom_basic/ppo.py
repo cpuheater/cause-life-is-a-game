@@ -2,9 +2,7 @@
 
 import numpy as np
 import cv2
-from vizdoom import gymnasium_wrapper  
-
-
+from vizdoom import gymnasium_wrapper
 
 cv2.ocl.setUseOpenCL(False)
 
@@ -102,16 +100,16 @@ class ObservationWrapper(gym.ObservationWrapper):
 
     def __init__(self, env, shape=IMAGE_SHAPE):
         super().__init__(env)
-        self.image_shape = shape        
+        self.image_shape = shape
         self.image_shape_reverse = shape[::-1]
-        self.env.frame_skip = args.frame_skip        
         num_channels = env.observation_space["screen"].shape[-1]
-        new_shape = (num_channels, self.image_shape[0], self.image_shape[1])        
+        new_shape = (num_channels, self.image_shape[0], self.image_shape[1])
         self.observation_space = gym.spaces.Box(0, 255, shape=new_shape, dtype=np.float32)
 
-    def observation(self, observation):        
+    def observation(self, observation):
+        #observation = cv2.cvtColor(observation["screen"], cv2.COLOR_BGR2GRAY)
         observation = cv2.resize(observation["screen"], self.image_shape_reverse)
-        observation = observation.astype('float32')        
+        observation = observation.astype('float32')
         return np.transpose(observation,(2,0,1))
 
 experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -134,11 +132,11 @@ import vizdoom.vizdoom as vzd
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            
+            env = gym.make(env_id, render_mode="rgb_array", frame_skip = args.frame_skip)
+
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)  
+            env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.TransformReward(env, lambda r: r * args.scale_reward)
         return ObservationWrapper(env)
@@ -244,7 +242,7 @@ for update in range(1, num_updates+1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
         next_done = np.logical_or(terminations, truncations)
-        rewards[step] = torch.tensor(reward).to(device).view(-1)        
+        rewards[step] = torch.tensor(reward).to(device).view(-1)
         next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
         if "final_info" in infos:
@@ -252,7 +250,7 @@ for update in range(1, num_updates+1):
                 if info and "episode" in info:
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)        
+                    writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
@@ -349,7 +347,7 @@ for update in range(1, num_updates+1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
-    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)    
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
 
 envs.close()
 writer.close()
