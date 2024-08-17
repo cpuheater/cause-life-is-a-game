@@ -2,7 +2,6 @@
 
 import numpy as np
 import cv2
-import vizdoom.vizdoom as vzd
 cv2.ocl.setUseOpenCL(False)
 from collections import deque
 import torch
@@ -11,6 +10,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
+from gymnasium.wrappers import RecordEpisodeStatistics
 
 import argparse
 from distutils.util import strtobool
@@ -20,6 +20,7 @@ import time
 import random
 import os
 import envpool
+from envpool import make_gym
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -94,15 +95,15 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-class RecordEpisodeStatistics(gym.Wrapper):
+class RecordEpisodeStatistics2(gym.Wrapper):
     def __init__(self, env, deque_size=100):
         super().__init__(env)
         self.num_envs = getattr(env, "num_envs", 1)
         self.episode_returns = None
         self.episode_lengths = None
 
-    def reset(self):
-        observations = super().reset()
+    def reset(self, **kwargs):
+        observations, info = super().reset(**kwargs)
         self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
         self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
         self.lives = np.zeros(self.num_envs, dtype=np.int32)
@@ -164,10 +165,17 @@ envs = envpool.make(
         use_inter_area_resize=False
     )
 
+env = make_gym(
+      "D1Basic-v1",
+      num_envs=args.num_envs,
+      max_episode_steps=2254,
+      use_combined_action=True
+    )
+
 envs.num_envs = args.num_envs
 envs.single_action_space = envs.action_space
 envs.single_observation_space = envs.observation_space
-envs = RecordEpisodeStatistics(envs)
+#envs = RecordEpisodeStatistics2(envs)
 
 assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 # ALGO LOGIC: initialize agent here:

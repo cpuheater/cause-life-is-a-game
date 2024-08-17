@@ -94,8 +94,8 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-IMAGE_SHAPE = (64, 64)
-
+IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
+IMAGE_SHAPE = (IMAGE_HEIGHT, IMAGE_WIDTH)
 class ObservationWrapper(gym.ObservationWrapper):
 
     def __init__(self, env, shape=IMAGE_SHAPE):
@@ -108,7 +108,7 @@ class ObservationWrapper(gym.ObservationWrapper):
 
     def observation(self, observation):
         #observation = cv2.cvtColor(observation["screen"], cv2.COLOR_BGR2GRAY)
-        observation = cv2.resize(observation["screen"], self.image_shape_reverse)
+        observation = cv2.resize(observation["screen"], self.image_shape_reverse, cv2.INTER_AREA)
         observation = observation.astype('float32')
         return np.transpose(observation,(2,0,1))
 
@@ -173,7 +173,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(1024, 512)),
+            layer_init(nn.Linear(2560, 512)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(512, envs.single_action_space.n-1), std=0.01)
