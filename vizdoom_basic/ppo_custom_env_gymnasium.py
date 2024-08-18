@@ -2,8 +2,9 @@
 
 import numpy as np
 from collections import deque
-import gym
-from gym import spaces
+import gymnasium
+from gymnasium import spaces
+from gymnasium.spaces import Discrete, Box
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
@@ -21,13 +22,11 @@ import vizdoom
 import argparse
 from distutils.util import strtobool
 import numpy as np
-import gym
-from gym.spaces import Discrete, Box
 import time
 import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
-from typing import Callable, Tuple, Dict
+from typing import Callable, Tuple, Dict, Optional
 from stable_baselines3.common import vec_env
 
 if __name__ == "__main__":
@@ -103,11 +102,11 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-class ViZDoomEnv2(gym.Env):
+class ViZDoomEnv(gymnasium.Env):
 
     def __init__(self,
                  game: vizdoom.DoomGame):
-        super().__init__()
+        super(ViZDoomEnv, self).__init__()
         self.action_space = spaces.Discrete(game.get_available_buttons_size())
         h, w, c = game.get_screen_height(), game.get_screen_width(), game.get_screen_channels()
         IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
@@ -120,11 +119,10 @@ class ViZDoomEnv2(gym.Env):
         self.possible_actions = np.eye(self.action_space.n).tolist()  # VizDoom needs a list of buttons states.
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
-
         self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
         self.state = self.empty_frame
 
-    def step(self, action: int) -> Tuple[np.ndarray, int, bool, Dict]:
+    def step(self, action: int):
         info = {}
         reward = self.game.make_action(self.possible_actions[action], self.frame_skip)
         done = self.game.is_episode_finished()
@@ -138,15 +136,17 @@ class ViZDoomEnv2(gym.Env):
             info['reward'] = self.total_reward
             info['length'] = self.total_length
 
-        return self.state, reward, done, info
+        return self.state, reward, done, done, info
 
-    def reset(self) -> np.ndarray:
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
+        if seed is not None:
+            self.game.set_seed(seed)
         self.game.new_episode()
         self.state = self._get_frame()
         self.total_reward = 0
         self.total_length = 0
-
-        return self.state
+        return self.state, {}
 
     def close(self) -> None:
         self.game.close()
@@ -158,79 +158,13 @@ class ViZDoomEnv2(gym.Env):
         return np.transpose(self.frame_processor(self.game.get_state().screen_buffer.transpose((1,2,0))), (2,0, 1)) if not done else self.empty_frame
 
 
-class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
-        # assign observation space
-        channel_num = 3
-
-        self.observation_shape = (channel_num, 64, 112)
-        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
-        self.reward_scale = reward_scale
-        game = DoomGame()
-
-        game.load_config(f"./scenarios/{game_config}.cfg")
-        game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.CRCGCB)
-
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
-        self.frame_skip = frame_skip
-
-        game.set_seed(seed)
-        game.set_window_visible(render)
-        game.init()
-
-        self.game = game
-
-    def get_current_input(self):
-        state = self.game.get_state()
-        res_source = []
-        res_source.append(state.screen_buffer)
-        res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
-        self.last_input = res
-        return res
-
-    def step(self, action):
-        info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
-        done = self.game.is_episode_finished()
-        if done:
-            ob = self.last_input
-        else:
-            ob = self.get_current_input()
-        # reward scaling
-        reward = reward * self.reward_scale
-        self.total_reward += reward
-        self.total_length += 1
-
-        if done:
-            info['reward'] = self.total_reward
-            info['length'] = self.total_length
-
-        return ob, reward, done, info
-
-    def reset(self):
-        self.game.new_episode()
-        self.total_reward = 0
-        self.total_length = 0
-        ob = self.get_current_input()
-        return ob
-
-    def close(self):
-        self.game.close()
-
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
         super(VecPyTorch, self).__init__(venv)
         self.device = device
 
     def reset(self):
-        obs = self.venv.reset()
+        obs  = self.venv.reset()
         obs = torch.from_numpy(obs).float().to(self.device)
         return obs
 
@@ -240,6 +174,7 @@ class VecPyTorch(VecEnvWrapper):
 
     def step_wait(self):
         obs, reward, done, info = self.venv.step_wait()
+        #done = np.logical_or(terminations, truncations)
         obs = torch.from_numpy(obs).float().to(self.device)
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
@@ -261,14 +196,14 @@ np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
-def create_env() -> ViZDoomEnv2:
+def create_env() -> ViZDoomEnv:
     def thunk():
         game = vizdoom.DoomGame()
         game.load_config(f'scenarios/{args.env_id}.cfg')
         game.set_window_visible(False)
         game.init()
         # Wrap the game with the Gym adapter.
-        return ViZDoomEnv2(game)
+        return ViZDoomEnv(game)
     return thunk
 
 #envs = VecPyTorch(DummyVecEnv([create_env(**kwargs) for i in range(args.num_envs)]), device)
@@ -342,6 +277,7 @@ values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
+start_time = time.time()
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
 next_obs = envs.reset()
@@ -479,6 +415,7 @@ for update in range(1, num_updates+1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
 
 envs.close()
 writer.close()
