@@ -95,6 +95,8 @@ if __name__ == "__main__":
                           help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+    parser.add_argument('--channels', type=int, default=1,
+                        help="the number of channels")
 
     args = parser.parse_args()
     #if not args.seed:
