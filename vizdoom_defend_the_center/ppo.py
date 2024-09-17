@@ -170,8 +170,8 @@ def make_env(env_id, idx, capture_video, run_name):
             env = gymnasium.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gymnasium.make(env_id)
-        env = gymnasium.wrappers.RecordEpisodeStatistics(env)
         env = gymnasium.wrappers.TransformReward(env, lambda r: r * args.scale_reward)
+        env = gymnasium.wrappers.RecordEpisodeStatistics(env)
         return ObservationWrapper(env)
     return thunk
 

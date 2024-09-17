@@ -34,7 +34,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env-id', type=str, default="health_gathering",
+    parser.add_argument('--env-id', type=str, default="defend_the_center",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -54,7 +54,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=0.01,
+    parser.add_argument('--scale-reward', type=float, default=1,
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
@@ -129,7 +129,8 @@ class ViZDoomEnv(gymnasium.Env):
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
         curr_health = self.game.get_game_variable(GameVariable.HEALTH)
-        reward = self.shape_reward(reward, curr_health, self.prev_health)
+        curr_ammo = self.game.get_game_variable(GameVariable.AMMO2)
+        reward = self.shape_reward(reward, curr_health, self.prev_health, curr_ammo, self.prev_ammo)
         reward = reward * self.scale_reward
         self.total_reward += reward
         self.total_length += 1
@@ -137,6 +138,7 @@ class ViZDoomEnv(gymnasium.Env):
             info['reward'] = self.total_reward
             info['length'] = self.total_length
         self.prev_health = curr_health
+        self.prev_ammo = curr_ammo
         return self.state, reward, done, done, info
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -148,13 +150,14 @@ class ViZDoomEnv(gymnasium.Env):
         self.total_reward = 0
         self.total_length = 0
         self.prev_health = self.game.get_game_variable(GameVariable.HEALTH)
+        self.prev_ammo = self.game.get_game_variable(GameVariable.AMMO2)
         return self.state, {}
 
-    def shape_reward(self, r_t, curr_health, prev_health):
+    def shape_reward(self, r_t, curr_health, prev_health, curr_ammo, prev_ammo):
         if (curr_health < prev_health):
             r_t = r_t - 0.1
-        if (curr_health > prev_health):
-            r_t = r_t + 1
+        if (curr_ammo < prev_ammo):
+            r_t = r_t - 0.1
         return r_t
 
     def close(self) -> None:
@@ -218,9 +221,8 @@ def create_env() -> ViZDoomEnv:
     def thunk():
         game = vizdoom.DoomGame()
         game.load_config(f'scenarios/{args.env_id}.cfg')
-        game.set_window_visible(True)
+        game.set_window_visible(False)
         game.init()
-        # Wrap the game with the Gym adapter.
         return ViZDoomEnv(game, channels=args.channels)
     return thunk
 
@@ -326,11 +328,6 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
-        #for info in infos:
-        #    if 'episode' in info.keys():
-        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
-        #        break
         for info in infos:
             if 'reward' in info.keys():
                 print(f"global_step={global_step}, episodic_return={info['reward']}")
