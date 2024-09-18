@@ -28,6 +28,7 @@ import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 from typing import Callable, Tuple, Dict, Optional
 from stable_baselines3.common import vec_env
+import itertools
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -56,7 +57,7 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--frame-skip', type=int, default=4,
+    parser.add_argument('--frame-skip', type=int, default=3,
                         help='frame skip')
 
     # Algorithm specific arguments
@@ -109,14 +110,19 @@ class ViZDoomEnv(gymnasium.Env):
     def __init__(self,
                  game: vizdoom.DoomGame, channels = 1):
         super(ViZDoomEnv, self).__init__()
-        self.action_space = spaces.Discrete(game.get_available_buttons_size())
+        n = game.get_available_buttons_size()        
+        actions = [list(a) for a in itertools.product([0, 1], repeat=n)]
+        actions.remove([True, True, True])
+        actions.remove([True, True, False])
+        self.actions = actions
+        self.action_space = spaces.Discrete(len(actions))
+
         h, w = game.get_screen_height(), game.get_screen_width()
         IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
         self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
 
         # Assign other variables
         self.game = game
-        self.possible_actions = np.eye(self.action_space.n).tolist()  # VizDoom needs a list of buttons states.
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
         self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
@@ -125,7 +131,7 @@ class ViZDoomEnv(gymnasium.Env):
 
     def step(self, action: int):
         info = {}
-        reward = self.game.make_action(self.possible_actions[action], self.frame_skip)
+        reward = self.game.make_action(self.actions[action], self.frame_skip)
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
         reward = reward * self.scale_reward

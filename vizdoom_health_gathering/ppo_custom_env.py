@@ -151,10 +151,7 @@ class ViZDoomEnv(gymnasium.Env):
         return self.state, {}
 
     def shape_reward(self, r_t, curr_health, prev_health):
-        if (curr_health < prev_health):
-            r_t = r_t - 0.1
-        if (curr_health > prev_health):
-            r_t = r_t + 1
+        r_t = r_t + (curr_health - prev_health)
         return r_t
 
     def close(self) -> None:

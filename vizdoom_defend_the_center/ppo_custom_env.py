@@ -139,7 +139,7 @@ class ViZDoomEnv(gymnasium.Env):
             info['length'] = self.total_length
         self.prev_health = curr_health
         self.prev_ammo = curr_ammo
-        return self.state, reward, done, done, info
+        return self.state, reward, done, info
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
@@ -221,7 +221,7 @@ def create_env() -> ViZDoomEnv:
     def thunk():
         game = vizdoom.DoomGame()
         game.load_config(f'scenarios/{args.env_id}.cfg')
-        game.set_window_visible(False)
+        game.set_window_visible(True)
         game.init()
         return ViZDoomEnv(game, channels=args.channels)
     return thunk
