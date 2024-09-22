@@ -1,7 +1,7 @@
 # https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
 
 import numpy as np
-from torch.utils.tensorboard import SummaryWriter
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,6 +16,7 @@ import time
 import random
 import os
 import gymnasium as gym
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
@@ -36,7 +37,7 @@ if __name__ == "__main__":
                         help='if toggled, cuda will not be enabled by default')
     parser.add_argument('--prod-mode', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='run the script in production mode and use wandb to log outputs')
-    parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
     parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
                         help="the wandb's project name")
@@ -92,7 +93,6 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 start_time = time.time()
-
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
@@ -326,7 +326,7 @@ def pad_sequence(sequence, target_length):
     return np.concatenate((sequence, padding), axis=0)
 
 rnn_hidden_size = args.rnn_hidden_size
-agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=526).to(device)
+agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=args.rnn_hidden_size).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
@@ -340,7 +340,6 @@ rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
-
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
@@ -363,7 +362,7 @@ for update in range(1, num_updates+1):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
         dones[step] = next_done
-        rnn_hidden_states[step] = rnn_hidden_state        
+        rnn_hidden_states[step] = rnn_hidden_state
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
@@ -376,12 +375,11 @@ for update in range(1, num_updates+1):
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
         next_done = np.logical_or(terminations, truncations)
-        rewards[step] = torch.tensor(reward).to(device).view(-1)        
-        next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+        rewards[step], next_done, next_obs = torch.tensor(reward).to(device).view(-1), torch.Tensor(next_done).to(device), torch.Tensor(next_obs).to(device)
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
         rnn_hidden_state = rnn_hidden_state * mask
-        
-
+        indices = torch.nonzero(next_done).flatten().tolist()
+        [episode_done_indices[index].append(step) for index in indices]
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
@@ -423,13 +421,13 @@ for update in range(1, num_updates+1):
                                              rnn_hidden_states)
         for batch in data_generator:
             b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
-                                                                                                                                   batch['values'], batch['returns'], \
-                                                                                                                                   batch['log_probs'], batch['advantages'], \
-                                                                                                                                   batch["hxs"], batch["loss_mask"]
+                                                                                                                      batch['values'], batch['returns'], \
+                                                                                                                      batch['log_probs'], batch['advantages'], \
+                                                                                                                      batch["hxs"], batch["loss_mask"]
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, b_rnn_hidden_states.unsqueeze(0),
+            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0)),
                                                                      sequence_length=args.seq_length, action=b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 
@@ -458,6 +456,7 @@ for update in range(1, num_updates+1):
 
             optimizer.zero_grad()
             loss.backward()
+            grad_norm = sum(p.grad.detach().data.norm(2).item() ** 2 for p in agent.parameters()) ** 0.5
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
@@ -466,6 +465,7 @@ for update in range(1, num_updates+1):
                 break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    writer.add_scalar("charts/grad_norm", grad_norm, global_step)
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
     writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
     writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
@@ -473,7 +473,7 @@ for update in range(1, num_updates+1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
-    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)        
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)         
 
 envs.close()
 writer.close()

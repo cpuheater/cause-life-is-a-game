@@ -2,9 +2,12 @@
 
 import numpy as np
 from collections import deque
-import gym
-from gym import spaces
-
+import vizdoom
+import gymnasium
+from gymnasium import spaces
+from gymnasium.spaces import Discrete, Box
+import cv2
+from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,28 +19,80 @@ import argparse
 from distutils.util import strtobool
 import collections
 import numpy as np
-import gym
-from gym.wrappers import TimeLimit, Monitor
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
 import itertools
 
-def initialize_vizdoom(config):
-    game = DoomGame()
-    game.load_config(config)
-    #game.set_window_visible(False)
-    game.set_mode(Mode.PLAYER)
-    game.set_screen_format(ScreenFormat.CRCGCB)
-    game.set_screen_resolution(ScreenResolution.RES_160X120)
-    game.init()
-    return game
 
-def preprocess(img, resolution):
-    img = img.transpose((1, 2, 0))
-    return cv2.resize(img, resolution).astype(np.float32).transpose((2,0,1))
+class ViZDoomEnv(gymnasium.Env):
+    def __init__(self,
+                 game: vizdoom.DoomGame, channels = 1):
+        super(ViZDoomEnv, self).__init__()
+        self.action_space = spaces.Discrete(game.get_available_buttons_size())
+        h, w = game.get_screen_height(), game.get_screen_width()
+        IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
+        self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
+
+        # Assign other variables
+        self.game = game
+        self.possible_actions = np.eye(self.action_space.n).tolist()  # VizDoom needs a list of buttons states.
+        self.frame_skip = args.frame_skip
+        self.scale_reward = args.scale_reward
+        self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
+        self.state = self.empty_frame
+        self.channels = channels
+
+    def step(self, action: int):
+        info = {}
+        reward = self.game.make_action(self.possible_actions[action], self.frame_skip)
+        done = self.game.is_episode_finished()
+        self.state = self._get_frame(done)
+        reward = reward * self.scale_reward
+        self.total_reward += reward
+        self.total_length += 1
+        if done:
+            info['reward'] = self.total_reward
+            info['length'] = self.total_length
+
+        return self.state, reward, done, info
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        super().reset(seed=seed)
+        if seed is not None:
+            self.game.set_seed(seed)
+        self.game.new_episode()
+        self.state = self._get_frame()
+        self.total_reward = 0
+        self.total_length = 0
+        return self.state, {}
+
+    def close(self) -> None:
+        self.game.close()
+
+    def render(self, mode='human'):
+        pass
+
+    def get_screen(self):
+        screen = self.game.get_state().screen_buffer
+        channels, h, w = self.observation_space.shape
+        screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
+        if screen.ndim == 2:
+            screen = np.expand_dims(screen, 0)
+        return screen
+
+    def _get_frame(self, done: bool = False) -> np.ndarray:
+        return self.get_screen() if not done else self.empty_frame
+
+
+def create_env() -> ViZDoomEnv:
+    game = vizdoom.DoomGame()
+    game.load_config(f'scenarios/{args.env_id}.cfg')
+    game.set_window_visible(True)
+    game.init()
+    return ViZDoomEnv(game, channels=args.channels)
+
+
 
 class Scale(nn.Module):
     def __init__(self, scale):
@@ -52,6 +107,8 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
+    parser.add_argument('--env-id', type=str, default="basic",
+                        help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=0.00025,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=2,
@@ -70,6 +127,12 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
+    parser.add_argument('--scale-reward', type=float, default=0.01,
+                        help='scale reward')
+    parser.add_argument('--channels', type=int, default=1,
+                        help="the number of channels")
+    parser.add_argument('--frame-skip', type=int, default=4,
+                        help='frame skip')
 
     # Algorithm specific arguments
     parser.add_argument('--buffer-size', type=int, default=10000,
@@ -91,7 +154,7 @@ if __name__ == "__main__":
     parser.add_argument('--learning-starts', type=int, default=800,
                         help="timestep to start learning")
     parser.add_argument('--train-frequency', type=int, default=4,
-                        help="the frequency of training")
+                        help="the frequency of training")  
     args = parser.parse_args()
     #if not args.seed:
     args.seed = int(time.time())
@@ -109,11 +172,8 @@ if args.prod_mode:
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 frame_repeat = 4
-resolution = (64, 112)
-frames = 3
-game = initialize_vizdoom("./scenarios/basic.cfg")
-n = game.get_available_buttons_size()
-actions = [list(a) for a in itertools.product([0, 1], repeat=n)]
+frames = 1
+env = create_env()
 
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -151,7 +211,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, actions, frames=3):
+    def __init__(self, num_actions, frames=1):
         super(QNetwork, self).__init__()
         self.network = nn.Sequential(
             Scale(1 / 255),
@@ -162,18 +222,17 @@ class QNetwork(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
-            nn.ReLU()
+            layer_init(nn.Linear(2560, 512))
         )
 
         self.v = nn.Linear(512, 1)
-        self.a = nn.Linear(512, len(actions))
+        self.a = nn.Linear(512, num_actions)
 
     def forward(self, x):
-        x = torch.Tensor(x).to(device)
+        x = torch.Tensor(x, device = device)
         x = self.network(x)
         v = self.v(x)
-        a = self.a(x)
+        a = self.a(x)        
         return v + a - a.mean()
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -182,8 +241,8 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 
 rb = ReplayBuffer(args.buffer_size)
-q_network = QNetwork(actions, frames).to(device)
-target_network = QNetwork(actions, frames).to(device)
+q_network = QNetwork(env.action_space.n, frames).to(device)
+target_network = QNetwork(env.action_space.n, frames).to(device)
 target_network.load_state_dict(q_network.state_dict())
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
@@ -191,29 +250,24 @@ print(device.__repr__())
 print(q_network)
 
 # TRY NOT TO MODIFY: start the game
-game.new_episode()
-episode_reward = 0
-obs = game.get_state().screen_buffer
-obs = preprocess(obs, resolution)
+obs, _ = env.reset()
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     if random.random() < epsilon:
-        action = torch.tensor(random.randint(0, len(actions) - 1)).long().item()
+        action = torch.tensor(random.randint(0, env.action_space.n - 1)).long().item()
     else:
         logits = q_network.forward(obs.reshape((1,)+obs.shape))
         action = torch.argmax(logits, dim=1).tolist()[0]
 
     # TRY NOT TO MODIFY: execute the game and log data.
-    reward = game.make_action(actions[action], frame_repeat)
-    reward *= 0.01
-    done = game.is_episode_finished()
+    next_obs, reward, done, infos = env.step(action)
 
-    next_obs = preprocess(np.zeros((3, resolution[0], resolution[1])), resolution) if done else preprocess(game.get_state().screen_buffer, resolution)
-
-    if done:
-        writer.add_scalar("charts/episode_reward", game.get_total_reward(), global_step)
-        writer.add_scalar("charts/epsilon", epsilon, global_step)
+    if 'reward' in infos.keys():
+        print(f"global_step={global_step}, episodic_return={infos['reward']}")
+        writer.add_scalar("charts/episodic_return", infos['reward'], global_step)
+    if 'length' in infos.keys():
+        writer.add_scalar("charts/episodic_length", infos['length'], global_step)
 
     rb.put((obs, action, reward, next_obs, done))
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
@@ -242,11 +296,9 @@ for global_step in range(args.total_timesteps):
 
     # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
     if done:
-        game.new_episode()
-        obs, episode_reward = game.get_state().screen_buffer, 0
-        obs = preprocess(obs, resolution)
-    else:
-        obs = next_obs
+       obs, _ = env.reset()
+    else:        
+       obs = next_obs
 
 
 writer.close()

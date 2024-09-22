@@ -287,7 +287,7 @@ for global_step in range(args.total_timesteps):
 
     # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
     if done:
-       obs, _ = env.reset()
+       obs, _ = env.reset(seed=args.seed)
     else:        
        obs = next_obs
 
