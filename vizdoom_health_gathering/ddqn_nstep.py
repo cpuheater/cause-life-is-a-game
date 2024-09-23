@@ -42,7 +42,6 @@ class ViZDoomEnv(gymnasium.Env):
 
         # Assign other variables
         self.game = game
-        self.possible_actions = np.eye(self.action_space.n).tolist()  # VizDoom needs a list of buttons states.
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
         self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
@@ -234,7 +233,7 @@ class ReplayBufferNStep(object):
         _, _, reward, next_observation, done = self.n_step_buffer[-1]
         for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
             reward = self.gamma * reward * (1 - do) + r
-            mext_observation, done = (next_obs, do) if do else (next_observation, done)
+            next_observation, done = (next_obs, do) if do else (next_observation, done)
         return reward, next_observation, done
 
     def append(self, transition):
@@ -297,7 +296,7 @@ optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
 print(device.__repr__())
 print(q_network)
-
+start_time = time.time()
 # TRY NOT TO MODIFY: start the game
 obs, _ = env.reset()
 for global_step in range(args.total_timesteps):
@@ -329,6 +328,7 @@ for global_step in range(args.total_timesteps):
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
+            writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
 
         # optimize the midel
         optimizer.zero_grad()
