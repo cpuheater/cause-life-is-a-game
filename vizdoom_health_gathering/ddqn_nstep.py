@@ -148,7 +148,7 @@ if __name__ == "__main__":
                         help='frame skip')
 
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=100000,
+    parser.add_argument('--buffer-size', type=int, default=400000,
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
