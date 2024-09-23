@@ -20,7 +20,7 @@ experiment management with [weights and biases](https://wandb.ai/site).
 * ppo_separate - separate network for the actor and the critic
 * frame_stacking - stacking four consecutive frames
 * vt - vision transformer as an encoder
-* n_step - using n step returns
+* n_step - using n step returns, Asynchronous Methods for Deep Reinforcement Learning (https://arxiv.org/pdf/1602.01783)
 * relational - relational deep reinforcement learning (https://arxiv.org/abs/1806.01830)
 * sil - self imitation learning (https://arxiv.org/abs/1806.05635)  
 * icm - curiosity driven exploration (https://arxiv.org/pdf/1705.05363.pdf)

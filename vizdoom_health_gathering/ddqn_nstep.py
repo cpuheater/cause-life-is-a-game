@@ -148,7 +148,7 @@ if __name__ == "__main__":
                         help='frame skip')
 
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=400000,
+    parser.add_argument('--buffer-size', type=int, default=100000,
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -342,7 +342,7 @@ for global_step in range(args.total_timesteps):
 
     # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
     if done:
-       obs, _ = env.reset()
+       obs, _ = env.reset(seed=args.seed)
     else:        
        obs = next_obs
 
