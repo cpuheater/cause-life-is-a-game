@@ -1,4 +1,4 @@
- # https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
+# https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
 
 import numpy as np
 from collections import deque
@@ -23,38 +23,45 @@ import time
 import random
 import os
 import itertools
+from vizdoom import GameVariable
 
 
 class ViZDoomEnv(gymnasium.Env):
     def __init__(self,
                  game: vizdoom.DoomGame, channels = 1):
         super(ViZDoomEnv, self).__init__()
-        self.action_space = spaces.Discrete(game.get_available_buttons_size())
         h, w = game.get_screen_height(), game.get_screen_width()
         IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
         self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
 
         # Assign other variables
         self.game = game
-        self.possible_actions = np.eye(self.action_space.n).tolist()  # VizDoom needs a list of buttons states.
+        n = game.get_available_buttons_size()        
+        actions = [list(a) for a in itertools.product([0, 1], repeat=n)]
+        actions.remove([True, True, True])
+        actions.remove([True, True, False])
+        self.actions = actions
+        self.action_space = spaces.Discrete(len(actions))
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
         self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
         self.state = self.empty_frame
         self.channels = channels
+        self.step_reward = 0
 
     def step(self, action: int):
         info = {}
-        reward = self.game.make_action(self.possible_actions[action], self.frame_skip)
+        reward = self.game.make_action(self.actions[action], self.frame_skip)
         done = self.game.is_episode_finished()
-        self.state = self._get_frame(done)
+        curr_health = self.game.get_game_variable(GameVariable.HEALTH)
+        reward = self.shape_reward(reward, curr_health, self.prev_health)
         reward = reward * self.scale_reward
         self.total_reward += reward
         self.total_length += 1
         if done:
             info['reward'] = self.total_reward
             info['length'] = self.total_length
-
+        self.prev_health = curr_health
         return self.state, reward, done, info
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -65,7 +72,13 @@ class ViZDoomEnv(gymnasium.Env):
         self.state = self._get_frame()
         self.total_reward = 0
         self.total_length = 0
+        self.step_reward = 0
+        self.prev_health = self.game.get_game_variable(GameVariable.HEALTH)
         return self.state, {}
+    
+    def shape_reward(self, r_t, curr_health, prev_health):
+        r_t = r_t + (curr_health - prev_health)   
+        return r_t
 
     def close(self) -> None:
         self.game.close()
@@ -107,13 +120,13 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env-id', type=str, default="basic",
+    parser.add_argument('--env-id', type=str, default="health_gathering",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=0.00025,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=2,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=100000,
+    parser.add_argument('--total-timesteps', type=int, default=1000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -135,7 +148,7 @@ if __name__ == "__main__":
                         help='frame skip')
 
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=10000,
+    parser.add_argument('--buffer-size', type=int, default=100000,
                         help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
@@ -147,11 +160,11 @@ if __name__ == "__main__":
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--start-e', type=float, default=1.0,
                         help="the starting epsilon for exploration")
-    parser.add_argument('--end-e', type=float, default=0.02,
+    parser.add_argument('--end-e', type=float, default=0.01,
                         help="the ending epsilon for exploration")
-    parser.add_argument('--exploration-fraction', type=float, default=0.4,
+    parser.add_argument('--exploration-fraction', type=float, default=0.1,
                         help="the fraction of `total-timesteps` it takes from start-e to go end-e")
-    parser.add_argument('--learning-starts', type=int, default=800,
+    parser.add_argument('--learning-starts', type=int, default=10000,
                         help="timestep to start learning")
     parser.add_argument('--train-frequency', type=int, default=4,
                         help="the frequency of training")  

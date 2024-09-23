@@ -1,4 +1,4 @@
- # https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
+# https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
 
 import numpy as np
 from collections import deque
@@ -222,18 +222,12 @@ class QNetwork(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, 512))
+            nn.Linear(2560, num_actions)
         )
 
-        self.v = nn.Linear(512, 1)
-        self.a = nn.Linear(512, num_actions)
-
     def forward(self, x):
-        x = torch.Tensor(x, device = device)
-        x = self.network(x)
-        v = self.v(x)
-        a = self.a(x)        
-        return v + a - a.mean()
+        x = torch.Tensor(x).to(device)
+        return self.network(x)
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
@@ -273,13 +267,10 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
-            q_next = q_network.forward(s_next_obses)
-            max_action = torch.argmax(q_next, dim=1, keepdim=True)
-            target_q_next = target_network.forward(s_next_obses)
-            target_max = target_q_next.gather(1, max_action.long()).squeeze(1)
-            target_q = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
-        curr_q = q_network.forward(s_obs).gather(1, torch.LongTensor(s_actions).view(-1, 1).to(device)).squeeze()
-        loss = loss_fn(target_q, curr_q)
+            target_max = torch.max(target_network.forward(s_next_obses), dim=1)[0]
+            td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
+        old_val = q_network.forward(s_obs).gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
+        loss = loss_fn(td_target, old_val)
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
@@ -296,7 +287,7 @@ for global_step in range(args.total_timesteps):
 
     # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
     if done:
-       obs, _ = env.reset()
+       obs, _ = env.reset(seed=args.seed)
     else:        
        obs = next_obs
 
