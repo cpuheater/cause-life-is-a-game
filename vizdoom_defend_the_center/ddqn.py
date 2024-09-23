@@ -256,6 +256,7 @@ optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
 print(device.__repr__())
 print(q_network)
+start_time = time()
 
 # TRY NOT TO MODIFY: start the game
 obs, _ = env.reset()
@@ -288,6 +289,7 @@ for global_step in range(args.total_timesteps):
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
+            writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
 
         # optimize the midel
         optimizer.zero_grad()
