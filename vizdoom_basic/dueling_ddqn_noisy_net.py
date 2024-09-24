@@ -324,12 +324,12 @@ start_time = time.time()
 obs, _ = env.reset()
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
-    epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
-    if random.random() < epsilon:
-        action = torch.tensor(random.randint(0, env.action_space.n - 1)).long().item()
-    else:
-        logits = q_network.forward(obs.reshape((1,)+obs.shape))
-        action = torch.argmax(logits, dim=1).tolist()[0]
+    #epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
+    #if random.random() < epsilon:
+    #    action = torch.tensor(random.randint(0, env.action_space.n - 1)).long().item()
+    #else:
+    logits = q_network.forward(obs.reshape((1,)+obs.shape))
+    action = torch.argmax(logits, dim=1).tolist()[0]
 
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, infos = env.step(action)
