@@ -139,7 +139,7 @@ class ViZDoomEnv(gymnasium.Env):
             info['length'] = self.total_length
         self.prev_health = curr_health
         self.prev_ammo = curr_ammo
-        return self.state, reward, done, info
+        return self.state, reward, done, done, info
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)

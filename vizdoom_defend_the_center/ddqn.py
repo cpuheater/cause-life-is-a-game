@@ -127,7 +127,7 @@ if __name__ == "__main__":
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=2,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=100000,
+    parser.add_argument('--total-timesteps', type=int, default=1000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -163,7 +163,7 @@ if __name__ == "__main__":
                         help="the starting epsilon for exploration")
     parser.add_argument('--end-e', type=float, default=0.01,
                         help="the ending epsilon for exploration")
-    parser.add_argument('--exploration-fraction', type=float, default=0.1,
+    parser.add_argument('--exploration-fraction', type=float, default=0.01,
                         help="the fraction of `total-timesteps` it takes from start-e to go end-e")
     parser.add_argument('--learning-starts', type=int, default=800,
                         help="timestep to start learning")
@@ -256,7 +256,7 @@ optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
 print(device.__repr__())
 print(q_network)
-start_time = time()
+start_time = time.time()
 
 # TRY NOT TO MODIFY: start the game
 obs, _ = env.reset()
