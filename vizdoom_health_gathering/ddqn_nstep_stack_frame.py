@@ -44,7 +44,7 @@ class ViZDoomEnv(gymnasium.Env):
         self.game = game
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
-        self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
+        self.empty_frame = np.zeros((1, self.observation_space.shape[1], self.observation_space.shape[2]), dtype=np.uint8)
         self.state = self.empty_frame
         self.channels = channels
 
@@ -52,7 +52,6 @@ class ViZDoomEnv(gymnasium.Env):
         info = {}
         reward = self.game.make_action(self.actions[action], self.frame_skip)
         done = self.game.is_episode_finished()
-        self.state = self._get_frame(done)
         curr_health = self.game.get_game_variable(GameVariable.HEALTH)
         reward = self.shape_reward(reward, curr_health, self.prev_health)
         reward = reward * self.scale_reward
@@ -62,18 +61,19 @@ class ViZDoomEnv(gymnasium.Env):
             info['reward'] = self.total_reward
             info['length'] = self.total_length
         self.prev_health = curr_health
-        return self.state, reward, done, info
+        frames = self.stack_frames(False, done)
+        return frames, reward, done, info
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         if seed is not None:
             self.game.set_seed(seed)
         self.game.new_episode()
-        self.state = self._get_frame()
         self.total_reward = 0
         self.total_length = 0
         self.prev_health = self.game.get_game_variable(GameVariable.HEALTH)
-        return self.state, {}
+        frames = self.stack_frames(True, False)
+        return frames, {}
     
     def shape_reward(self, r_t, curr_health, prev_health):
         r_t = r_t + (curr_health - prev_health)
@@ -95,6 +95,16 @@ class ViZDoomEnv(gymnasium.Env):
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
         return self.get_screen() if not done else self.empty_frame
+    
+    def stack_frames(self, is_new_episode=False, done=False):
+        frame = self._get_frame(done = done)
+        if is_new_episode:
+            self.stacked_frames = deque(maxlen=self.channels)
+            for _ in range(self.channels):
+                self.stacked_frames.append(frame)
+        else:
+            self.stacked_frames.append(frame)
+        return np.concatenate(self.stacked_frames, axis=0)
 
 
 def create_env() -> ViZDoomEnv:
@@ -141,7 +151,7 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--channels', type=int, default=1,
+    parser.add_argument('--channels', type=int, default=4,
                         help="the number of channels")
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
@@ -163,7 +173,7 @@ if __name__ == "__main__":
                         help="the ending epsilon for exploration")
     parser.add_argument('--exploration-fraction', type=float, default=0.1,
                         help="the fraction of `total-timesteps` it takes from start-e to go end-e")
-    parser.add_argument('--learning-starts', type=int, default=10000,
+    parser.add_argument('--learning-starts', type=int, default=80000,
                         help="timestep to start learning")
     parser.add_argument('--train-frequency', type=int, default=4,
                         help="the frequency of training")
@@ -186,7 +196,6 @@ if args.prod_mode:
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 frame_repeat = 4
-frames = 1
 env = create_env()
 
 random.seed(args.seed)
@@ -289,8 +298,8 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 #rb = ReplayBuffer(args.buffer_size)
 rb = ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
-q_network = QNetwork(env.action_space.n, frames).to(device)
-target_network = QNetwork(env.action_space.n, frames).to(device)
+q_network = QNetwork(env.action_space.n, args.channels).to(device)
+target_network = QNetwork(env.action_space.n, args.channels).to(device)
 target_network.load_state_dict(q_network.state_dict())
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()

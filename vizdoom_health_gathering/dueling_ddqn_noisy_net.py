@@ -24,6 +24,7 @@ import random
 import os
 import itertools
 from vizdoom import GameVariable
+import math
 
 
 class ViZDoomEnv(gymnasium.Env):
@@ -33,15 +34,15 @@ class ViZDoomEnv(gymnasium.Env):
         h, w = game.get_screen_height(), game.get_screen_width()
         IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
         self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
+
+        # Assign other variables
+        self.game = game
         n = game.get_available_buttons_size()        
         actions = [list(a) for a in itertools.product([0, 1], repeat=n)]
         actions.remove([True, True, True])
         actions.remove([True, True, False])
         self.actions = actions
         self.action_space = spaces.Discrete(len(actions))
-
-        # Assign other variables
-        self.game = game
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
         self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
@@ -52,7 +53,6 @@ class ViZDoomEnv(gymnasium.Env):
         info = {}
         reward = self.game.make_action(self.actions[action], self.frame_skip)
         done = self.game.is_episode_finished()
-        self.state = self._get_frame(done)
         curr_health = self.game.get_game_variable(GameVariable.HEALTH)
         reward = self.shape_reward(reward, curr_health, self.prev_health)
         reward = reward * self.scale_reward
@@ -76,7 +76,7 @@ class ViZDoomEnv(gymnasium.Env):
         return self.state, {}
     
     def shape_reward(self, r_t, curr_health, prev_health):
-        r_t = r_t + (curr_health - prev_health)
+        r_t = r_t + (curr_health - prev_health)   
         return r_t
 
     def close(self) -> None:
@@ -103,7 +103,6 @@ def create_env() -> ViZDoomEnv:
     game.set_window_visible(True)
     game.init()
     return ViZDoomEnv(game, channels=args.channels)
-
 
 
 class Scale(nn.Module):
@@ -168,7 +167,7 @@ if __name__ == "__main__":
     parser.add_argument('--train-frequency', type=int, default=4,
                         help="the frequency of training")
     parser.add_argument('--n-step', type=int, default=8,
-                        help="")  
+                        help="")   
     args = parser.parse_args()
     #if not args.seed:
     args.seed = int(time.time())
@@ -255,12 +254,79 @@ class ReplayBufferNStep(object):
             rewards.append(reward)
             obses_tp1.append(np.array(obs_tp1, copy=False))
             dones.append(done)
-        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)    
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
+
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
+
+class NoisyLinear(nn.Module):
+
+    def __init__(self, in_features: int, out_features: int, std_init: float = 0.5):
+        """Initialization."""
+        super(NoisyLinear, self).__init__()
+        
+        self.in_features = in_features
+        self.out_features = out_features
+        self.std_init = std_init
+
+        self.weight_mu = nn.Parameter(torch.Tensor(out_features, in_features))
+        self.weight_sigma = nn.Parameter(
+            torch.Tensor(out_features, in_features)
+        )
+        self.register_buffer(
+            "weight_epsilon", torch.Tensor(out_features, in_features)
+        )
+
+        self.bias_mu = nn.Parameter(torch.Tensor(out_features))
+        self.bias_sigma = nn.Parameter(torch.Tensor(out_features))
+        self.register_buffer("bias_epsilon", torch.Tensor(out_features))
+
+        self.reset_parameters()
+        self.reset_noise()
+
+    def reset_parameters(self):
+        """Reset trainable network parameters (factorized gaussian noise)."""
+        mu_range = 1 / math.sqrt(self.in_features)
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.weight_sigma.data.fill_(
+            self.std_init / math.sqrt(self.in_features)
+        )
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_sigma.data.fill_(
+            self.std_init / math.sqrt(self.out_features)
+        )
+
+    def reset_noise(self):
+        """Make new noise."""
+        epsilon_in = self.scale_noise(self.in_features)
+        epsilon_out = self.scale_noise(self.out_features)
+
+        # outer product
+        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
+        self.bias_epsilon.copy_(epsilon_out)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward method implementation.
+        
+        We don't use separate statements on train / eval mode.
+        It doesn't show remarkable difference of performance.
+        """
+        return F.linear(
+            x,
+            self.weight_mu + self.weight_sigma * self.weight_epsilon,
+            self.bias_mu + self.bias_sigma * self.bias_epsilon,
+        )
+    
+    @staticmethod
+    def scale_noise(size: int) -> torch.Tensor:
+        """Set scale to make noise (factorized gaussian noise)."""
+        x = torch.randn(size)
+
+        return x.sign().mul(x.abs().sqrt())
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
@@ -275,12 +341,22 @@ class QNetwork(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(2560, num_actions)
+            layer_init(nn.Linear(2560, 512))
         )
 
+        self.v = NoisyLinear(512, 1)
+        self.a = NoisyLinear(512, num_actions)
+
     def forward(self, x):
-        x = torch.Tensor(x).to(device)
-        return self.network(x)
+        x = torch.Tensor(x, device = device)
+        x = self.network(x)
+        v = self.v(x)
+        a = self.a(x)        
+        return v + a - a.mean()
+    
+    def reset_noise(self):
+        self.v.reset_noise()
+        self.a.reset_noise()
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
@@ -297,16 +373,17 @@ loss_fn = nn.MSELoss()
 print(device.__repr__())
 print(q_network)
 start_time = time.time()
+
 # TRY NOT TO MODIFY: start the game
 obs, _ = env.reset()
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
-    epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
-    if random.random() < epsilon:
-        action = torch.tensor(random.randint(0, env.action_space.n - 1)).long().item()
-    else:
-        logits = q_network.forward(obs.reshape((1,)+obs.shape))
-        action = torch.argmax(logits, dim=1).tolist()[0]
+    #epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
+    #if random.random() < epsilon:
+    #    action = torch.tensor(random.randint(0, env.action_space.n - 1)).long().item()
+    #else:
+    logits = q_network.forward(obs.reshape((1,)+obs.shape))
+    action = torch.argmax(logits, dim=1).tolist()[0]
 
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, infos = env.step(action)
@@ -321,10 +398,13 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
-            target_max = torch.max(target_network.forward(s_next_obses), dim=1)[0]
-            td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
-        old_val = q_network.forward(s_obs).gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
-        loss = loss_fn(td_target, old_val)
+            q_next = q_network.forward(s_next_obses)
+            max_action = torch.argmax(q_next, dim=1, keepdim=True)
+            target_q_next = target_network.forward(s_next_obses)
+            target_max = target_q_next.gather(1, max_action.long()).squeeze(1)
+            target_q = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
+        curr_q = q_network.forward(s_obs).gather(1, torch.LongTensor(s_actions).view(-1, 1).to(device)).squeeze()
+        loss = loss_fn(target_q, curr_q)
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
@@ -335,6 +415,9 @@ for global_step in range(args.total_timesteps):
         loss.backward()
         #nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
         optimizer.step()
+
+        q_network.reset_noise()
+        target_network.reset_noise()
 
         # update the target network
         if global_step % args.target_network_frequency == 0:
