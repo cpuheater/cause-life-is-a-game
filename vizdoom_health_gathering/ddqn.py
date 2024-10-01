@@ -250,7 +250,7 @@ optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
 print(device.__repr__())
 print(q_network)
-start_time = time()
+start_time = time.time()
 
 # TRY NOT TO MODIFY: start the game
 obs, _ = env.reset()

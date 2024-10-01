@@ -143,7 +143,7 @@ if __name__ == "__main__":
                         help="the timesteps it takes to update the target network")
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--batch-size', type=int, default=64,
+    parser.add_argument('--batch-size', type=int, default=128,
                         help="the batch size of sample from the reply memory")
     parser.add_argument('--start-e', type=float, default=1.0,
                         help="the starting epsilon for exploration")
