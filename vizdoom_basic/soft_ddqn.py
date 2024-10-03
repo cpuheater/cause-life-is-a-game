@@ -23,7 +23,7 @@ import time
 import random
 import os
 import itertools
-
+from torch.distributions import Categorical
 
 class ViZDoomEnv(gymnasium.Env):
     def __init__(self,
@@ -84,15 +84,12 @@ class ViZDoomEnv(gymnasium.Env):
     def _get_frame(self, done: bool = False) -> np.ndarray:
         return self.get_screen() if not done else self.empty_frame
 
-
 def create_env() -> ViZDoomEnv:
     game = vizdoom.DoomGame()
     game.load_config(f'scenarios/{args.env_id}.cfg')
     game.set_window_visible(True)
     game.init()
     return ViZDoomEnv(game, channels=args.channels)
-
-
 
 class Scale(nn.Module):
     def __init__(self, scale):
@@ -213,6 +210,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class QNetwork(nn.Module):
     def __init__(self, num_actions, frames=1):
         super(QNetwork, self).__init__()
+        self.alpha = 4
         self.network = nn.Sequential(
             Scale(1 / 255),
             layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
@@ -228,7 +226,26 @@ class QNetwork(nn.Module):
     def forward(self, x):
         x = torch.Tensor(x).to(device)
         return self.network(x)
-
+    
+    def getV(self, q_value):
+        v = self.alpha * torch.log(torch.sum(torch.exp(q_value/self.alpha), dim=1, keepdim=True))
+        return v
+        
+    def choose_action(self, state):
+        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        # print('state : ', state)
+        with torch.no_grad():
+            q = self.forward(state)
+            v = self.getV(q).squeeze()
+            # print('q & v', q, v)
+            dist = torch.exp((q-v)/self.alpha)
+            # print(dist)
+            dist = dist / torch.sum(dist)
+            # print(dist)
+            c = Categorical(dist)
+            a = c.sample()
+        return a.item()
+    
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
@@ -252,8 +269,9 @@ for global_step in range(args.total_timesteps):
     if random.random() < epsilon:
         action = torch.tensor(random.randint(0, env.action_space.n - 1)).long().item()
     else:
-        logits = q_network.forward(obs.reshape((1,)+obs.shape))
-        action = torch.argmax(logits, dim=1).tolist()[0]
+        #logits = q_network.forward(obs.reshape((1,)+obs.shape))
+        #action_tmp = torch.argmax(logits, dim=1).tolist()[0]
+        action = q_network.choose_action(obs)    
 
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, infos = env.step(action)
@@ -268,11 +286,12 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
         with torch.no_grad():
-            target_max = torch.max(target_network.forward(s_next_obses), dim=1)[0]
-            td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
-        old_val = q_network.forward(s_obs).gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
-        loss = loss_fn(td_target, old_val)
+            next_q = target_network(s_next_obses)
+            next_v = target_network.getV(next_q).squeeze(1)
+            td_target = torch.Tensor(s_rewards).to(device) + (1 - torch.Tensor(s_dones).to(device)) * args.gamma * next_v
 
+        loss = loss_fn(q_network(s_obs).gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)), td_target.unsqueeze(1))
+                
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
             writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
