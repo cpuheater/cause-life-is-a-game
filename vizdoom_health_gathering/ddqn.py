@@ -117,7 +117,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--env-id', type=str, default="health_gathering",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=0.00025,
+    parser.add_argument('--learning-rate', type=float, default=0.0001,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=2,
                         help='seed of the experiment')
