@@ -144,9 +144,6 @@ class ViZDoomEnv(gymnasium.Env):
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
         curr_pos = self._get_game_variables()
-        #green_reward = self._get_green_reward(self.state)
-        #print(f"green_reward {green_reward}")
-        #reward += green_reward
         reward = self.shape_reward(reward, curr_pos, self.prev_pos)
         reward = reward * self.scale_reward
         self.total_reward += reward
@@ -192,25 +189,6 @@ class ViZDoomEnv(gymnasium.Env):
     def _get_frame(self, done: bool = False) -> np.ndarray:
         return self.get_screen() if not done else self.empty_frame
     
-    def _get_green_reward(self, observation):
-        observation = np.rollaxis(observation, 0, observation.ndim)        
-        hsv = cv2.cvtColor(observation, cv2.COLOR_BGR2HSV)
-        mask_green = cv2.inRange(hsv, (36, 25, 25), (70, 255, 255))
-        imask_green = mask_green > 0
-        green = np.zeros_like(observation, np.uint8)
-        green[imask_green] = observation[imask_green]
-        cv2.imwrite("green.jpg", green)
-
-        green_px_count = np.count_nonzero(green)
-
-        if green_px_count > 800 and green_px_count < 3000:
-            print("Vest visible!")
-            return 0.3
-
-        pw = 10**6
-        return green_px_count / pw
-
-
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
         super(VecPyTorch, self).__init__(venv)
@@ -331,7 +309,7 @@ values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
-goal_reached = 0
+goals = []
 start_time = time.time()
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
@@ -374,11 +352,11 @@ for update in range(1, num_updates+1):
                 writer.add_scalar("charts/episodic_return", info['reward'], global_step)
             if 'length' in info.keys():
                 writer.add_scalar("charts/episodic_length", info['length'], global_step)
-            if 'goal_reached' in info.keys() and info['goal_reached']:
-                goal_reached += 1
-                if global_step % 600:
-                    writer.add_scalar("charts/goal_reached", goal_reached, global_step)
-                    goal_reached = 0
+            if 'goal_reached' in info.keys():
+                goals.append(info['goal_reached'])
+                if len(goals) == args.num_envs:
+                    writer.add_scalar("charts/goal_reached", sum(goals), global_step)
+                    goals = []
              
 
     # bootstrap reward if not done. reached the batch limit
