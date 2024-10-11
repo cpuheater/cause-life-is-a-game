@@ -7,10 +7,13 @@ from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 from gym import spaces
 import argparse
+import gymnasium
+from gymnasium import spaces
+from gymnasium.spaces import Discrete, Box
 from distutils.util import strtobool
+import vizdoom
+import cv2
 import collections
-from gym.wrappers import Monitor
-from gym.spaces import Discrete, Box
 import time
 import random
 import os
@@ -18,78 +21,85 @@ from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
 import numpy as np
 
-class ViZDoomEnv:
-    def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
-        # assign observation space
-        channel_num = 3
 
-        self.observation_shape = (channel_num, 64, 112)
-        self.observation_space = Box(low=0, high=255, shape=self.observation_shape)
-        self.reward_scale = reward_scale
-        game = DoomGame()
+class ViZDoomEnv(gymnasium.Env):
+    def __init__(self,
+                 game: vizdoom.DoomGame, channels = 1):
+        super(ViZDoomEnv, self).__init__()
+        self.action_space = spaces.Discrete(game.get_available_buttons_size())
+        h, w = game.get_screen_height(), game.get_screen_width()
+        IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
+        self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
 
-        game.load_config(f"./scenarios/{game_config}.cfg")
-        game.set_screen_resolution(ScreenResolution.RES_160X120)
-        game.set_screen_format(ScreenFormat.CRCGCB)
-
-        num_buttons = game.get_available_buttons_size()
-        self.action_space = Discrete(num_buttons)
-        actions = [([False] * num_buttons) for i in range(num_buttons)]
-        for i in range(num_buttons):
-            actions[i][i] = True
-        self.actions = actions
-        self.frame_skip = frame_skip
-
-        game.set_seed(seed)
-        game.set_window_visible(render)
-        game.init()
-
+        # Assign other variables
         self.game = game
+        self.possible_actions = np.eye(self.action_space.n).tolist()  # VizDoom needs a list of buttons states.
+        self.frame_skip = args.frame_skip
+        self.scale_reward = args.scale_reward
+        self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
+        self.state = self.empty_frame
+        self.channels = channels
 
-    def get_current_input(self):
-        state = self.game.get_state()
-        res_source = []
-        res_source.append(state.screen_buffer)
-        res = np.vstack(res_source)
-        res = skimage.transform.resize(res, self.observation_space.shape, preserve_range=True)
-        self.last_input = res
-        return res
-
-    def step(self, action):
+    def step(self, action: int):
         info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
+        reward = self.game.make_action(self.possible_actions[action], self.frame_skip)
+        tmp_reward = reward
+        reward *= 0.01
+        reward += 100 if reward > 0 else 0
         done = self.game.is_episode_finished()
-        if done:
-            ob = self.last_input
-        else:
-            ob = self.get_current_input()
-        # reward scaling
-        reward = reward * self.reward_scale
+        self.state = self._get_frame(done)
+        reward = reward * self.scale_reward
+        print(f"reward: {reward}")
         self.total_reward += reward
         self.total_length += 1
-
         if done:
             info['reward'] = self.total_reward
             info['length'] = self.total_length
 
-        return ob, reward, done, info
+        return self.state, reward, done, info
 
-    def reset(self):
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        super().reset(seed=seed)
+        if seed is not None:
+            self.game.set_seed(seed)
         self.game.new_episode()
+        self.state = self._get_frame()
         self.total_reward = 0
         self.total_length = 0
-        ob = self.get_current_input()
-        return ob
+        return self.state, {}
 
-    def close(self):
+    def close(self) -> None:
         self.game.close()
+
+    def render(self, mode='human'):
+        pass
+
+    def get_screen(self):
+        screen = self.game.get_state().screen_buffer
+        channels, h, w = self.observation_space.shape
+        screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
+        if screen.ndim == 2:
+            screen = np.expand_dims(screen, 0)
+        return screen
+
+    def _get_frame(self, done: bool = False) -> np.ndarray:
+        return self.get_screen() if not done else self.empty_frame
+
+
+def create_env() -> ViZDoomEnv:
+    game = vizdoom.DoomGame()
+    game.load_config(f'scenarios/{args.env_id}.cfg')
+    game.set_window_visible(True)
+    game.init()
+    return ViZDoomEnv(game, channels=args.channels)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='SAC with 2 Q functions, Online updates')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="basic",
+    parser.add_argument('--env-id', type=str, default="basic",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
@@ -113,6 +123,12 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--autotune', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='automatic tuning of the entropy coefficient.')
+    parser.add_argument('--scale-reward', type=float, default=0.01,
+                        help='scale reward')
+    parser.add_argument('--channels', type=int, default=1,
+                        help="the number of channels")
+    parser.add_argument('--frame-skip', type=int, default=4,
+                        help='frame skip')
 
     # Algorithm specific arguments
     parser.add_argument('--buffer-size', type=int, default=100000,
@@ -162,7 +178,7 @@ if args.prod_mode:
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
-env = ViZDoomEnv(args.seed, args.gym_id, render=True, reward_scale=0.01, frame_skip=4)
+env = create_env()
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -171,11 +187,6 @@ env.action_space.seed(args.seed)
 env.observation_space.seed(args.seed)
 input_shape = env.observation_space.shape
 output_shape = env.action_space.shape
-# respect the default timelimit
-
-if args.capture_video:
-    env = Monitor(env, f'videos/{experiment_name}')
-
 # ALGO LOGIC: initialize agent here:
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -189,7 +200,7 @@ class Policy(nn.Module):
         self.num_actions = num_actions
 
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(3, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(args.channels, 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
@@ -234,7 +245,7 @@ class SoftQNetwork(nn.Module):
         self.n_actions = num_actions
 
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(3, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(args.channels, 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
@@ -310,7 +321,7 @@ else:
 
 # TRY NOT TO MODIFY: start the game
 global_episode = 0
-obs, done = env.reset(), False
+obs, _= env.reset()
 episode_reward, episode_length= 0.,0
 max_episode_reward = -np.inf
 
@@ -321,12 +332,14 @@ for global_step in range(1, args.total_timesteps+1):
     else:
         action, _ = pg.get_action([obs], device)
     # TRY NOT TO MODIFY: execute the game and log data.
-    next_obs, reward, done, _ = env.step(action)
-    #if not done:
-    #    if reward < 0:
-    #        reward = -1
+    next_obs, reward, done, infos = env.step(action)
+    
+    if 'reward' in infos.keys():
+        print(f"global_step={global_step}, episodic_return={infos['reward']}")
+        writer.add_scalar("charts/episodic_return", infos['reward'], global_step)
+    if 'length' in infos.keys():
+        writer.add_scalar("charts/episodic_length", infos['length'], global_step)
 
-    reward = 100 if reward > 0 else reward
     rb.put((obs, action, reward, next_obs, done))
     episode_reward += reward
     episode_length += 1
@@ -383,7 +396,7 @@ for global_step in range(1, args.total_timesteps+1):
             #for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
             #    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
             #for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
-            #    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+            #    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)    
 
     if len(rb.buffer) > args.batch_size and global_step % 100 == 0:
         writer.add_scalar("losses/soft_q_value_1_loss", qf1_loss.item(), global_step)
@@ -395,17 +408,8 @@ for global_step in range(1, args.total_timesteps+1):
             writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
     if done:
-        print(f"Episode reward {episode_reward}")
-        global_episode += 1 # Outside the loop already means the episode is done
-        writer.add_scalar("charts/episode_reward", episode_reward, global_step)
-        writer.add_scalar("charts/episode_length", episode_length, global_step)
-        # Terminal verbosity
-        if global_episode % 10 == 0:
-            print(f"Episode: {global_episode} Step: {global_step}, Ep. Reward: {episode_reward}")
+       obs, _ = env.reset()        
 
-        # Reseting what need to be
-        obs, done = env.reset(), False
-        episode_reward, episode_length = 0., 0
 
 writer.close()
 env.close()
