@@ -6,7 +6,7 @@ import gymnasium
 from gymnasium import spaces
 from gymnasium.spaces import Discrete, Box
 import cv2
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, GameVariable
+from vizdoom import GameVariable, Button
 import skimage.transform
 import gymnasium
 
@@ -116,12 +116,8 @@ class ViZDoomEnv(gymnasium.Env):
 
         # Assign other variables
         self.game = game
-        n = game.get_available_buttons_size()        
-        actions = [list(a) for a in itertools.product([0, 1], repeat=n)]
-        #actions.remove([True, True, True])
-        #actions.remove([True, True, False])
-        self.actions = actions
-        self.action_space = spaces.Discrete(len(actions))
+        self.actions = self._get_actions()
+        self.action_space = spaces.Discrete(len(self.actions))
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
         self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
@@ -188,6 +184,40 @@ class ViZDoomEnv(gymnasium.Env):
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
         return self.get_screen() if not done else self.empty_frame
+    
+    def _get_actions(self):
+        MUTUALLY_EXCLUSIVE_GROUPS = [
+            [Button.MOVE_RIGHT, Button.MOVE_LEFT],
+            [Button.TURN_RIGHT, Button.TURN_LEFT],
+            #[Button.MOVE_FORWARD, Button.MOVE_BACKWARD],
+        ]
+        EXCLUSIVE_BUTTONS = [Button.ATTACK]
+        def has_exclusive_button(actions: np.ndarray, buttons: np.array) -> np.array:
+            exclusion_mask = np.isin(buttons, EXCLUSIVE_BUTTONS)    
+            return (np.any(actions.astype(bool) & exclusion_mask, axis=-1)) & (np.sum(actions, axis=-1) > 1)
+        
+        def has_excluded_pair(actions: np.ndarray, buttons: np.array) -> np.array:
+            mutual_exclusion_mask = np.array([np.isin(buttons, excluded_group) 
+                                      for excluded_group in MUTUALLY_EXCLUSIVE_GROUPS])
+            return np.any(np.sum(
+                (actions[:, np.newaxis, :] * mutual_exclusion_mask.astype(int)),
+                axis=-1) > 1, axis=-1)
+
+
+        def get_available_actions(buttons: np.array):
+            action_combinations = np.array([list(seq) for seq in itertools.product([0., 1.], repeat=len(buttons))])
+
+            illegal_mask = (has_excluded_pair(action_combinations, buttons)
+                    | has_exclusive_button(action_combinations, buttons))
+
+            possible_actions = action_combinations[~illegal_mask]
+            possible_actions = possible_actions[np.sum(possible_actions, axis=1) > 0]
+            return possible_actions.tolist()
+
+        possible_actions = get_available_actions(np.array([
+            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT, 
+            Button.MOVE_RIGHT]))
+        return possible_actions
     
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):

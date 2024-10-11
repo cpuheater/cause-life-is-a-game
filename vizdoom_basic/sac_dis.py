@@ -14,9 +14,9 @@ from gym.spaces import Discrete, Box
 import time
 import random
 import os
-from gym_minigrid.wrappers import *
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
 import skimage.transform
+import numpy as np
 
 class ViZDoomEnv:
     def __init__(self, seed, game_config, render=True, reward_scale=0.1, frame_skip=4):
