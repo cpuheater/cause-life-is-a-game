@@ -171,7 +171,7 @@ class Agent(nn.Module):
     def __init__(self, envs, frames=3, rnn_input_size=256, rnn_hidden_size=256):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            # Scale(1/255),
+            #Scale(1/255),
             layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
             nn.LeakyReLU(),
             layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
@@ -385,6 +385,7 @@ for update in range(1, num_updates+1):
         rnn_cell_state = rnn_cell_state * mask
         indices = torch.nonzero(next_done).flatten().tolist()
         [episode_done_indices[index].append(step) for index in indices]
+        
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
