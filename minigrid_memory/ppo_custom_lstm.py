@@ -16,7 +16,7 @@ import time
 import random
 import os
 import gymnasium as gym
-from custom_lstm import LSTM
+from custom_lstm import LSTM, CustomLSTM
 
 
 if __name__ == "__main__":
@@ -180,8 +180,8 @@ class Agent(nn.Module):
             nn.Flatten(),
             layer_init(nn.Linear(980, rnn_input_size))
         )
-        self.rnn = LSTM(rnn_input_size)
-        self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size, batch_first=True)
+        self.rnn = CustomLSTM(rnn_input_size, rnn_hidden_size)
+        #self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size, batch_first=True)
         for name, param in self.rnn.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)

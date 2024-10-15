@@ -95,7 +95,7 @@ if __name__ == "__main__":
                           help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
-    parser.add_argument('--channels', type=int, default=1,
+    parser.add_argument('--channels', type=int, default=3,
                         help="the number of channels")
 
     args = parser.parse_args()
@@ -180,6 +180,8 @@ class ViZDoomEnv(gymnasium.Env):
         screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
         if screen.ndim == 2:
             screen = np.expand_dims(screen, 0)
+        else:
+            screen = screen.transpose(2, 0, 1)    
         return screen
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
@@ -323,7 +325,7 @@ class Agent(nn.Module):
     def get_value(self, x):
         return self.critic(self.forward(x))
 
-agent = Agent(envs).to(device)
+agent = Agent(envs, args.channels).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
@@ -426,11 +428,9 @@ for update in range(1, num_updates+1):
     b_values = values.reshape(-1)
 
     # Optimizaing the policy and value network
-    target_agent = Agent(envs).to(device)
     inds = np.arange(args.batch_size,)
     for i_epoch_pi in range(args.update_epochs):
-        np.random.shuffle(inds)
-        target_agent.load_state_dict(agent.state_dict())
+        np.random.shuffle(inds)        
         for start in range(0, args.batch_size, args.minibatch_size):
             end = start + args.minibatch_size
             minibatch_ind = inds[start:end]
@@ -470,10 +470,6 @@ for update in range(1, num_updates+1):
 
         if args.kle_stop:
             if approx_kl > args.target_kl:
-                break
-        if args.kle_rollback:
-            if (b_logprobs[minibatch_ind] - agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])[1]).mean() > args.target_kl:
-                agent.load_state_dict(target_agent.state_dict())
                 break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
