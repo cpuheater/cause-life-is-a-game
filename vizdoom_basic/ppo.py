@@ -413,6 +413,20 @@ for update in range(1, num_updates+1):
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
+            for name, param in agent.named_parameters():
+                writer.add_histogram(
+                    tag=f"params/{name}", values=param.cpu(), global_step=global_step
+                )
+                writer.add_histogram(
+                    tag=f"grads/{name}", values=param.grad.cpu(), global_step=global_step
+                )
+            
+            #def log_gradients_in_model(model, writer, step):
+            #    for tag, value in model.named_parameters():
+            #        if value.grad is not None:
+            #            writer.add_histogram(tag + "/grad", value.grad.cpu(), step)
+            #log_gradients_in_model(agent, writer, global_step)            
+
         if args.kle_stop:
             if approx_kl > args.target_kl:
                 break

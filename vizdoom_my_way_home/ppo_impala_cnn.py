@@ -279,51 +279,62 @@ envs = VecPyTorch(
 assert isinstance(envs.action_space, gymnasium.spaces.discrete.Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
-class Scale(nn.Module):
-    def __init__(self, scale):
-        super().__init__()
-        self.scale = scale
-
-    def forward(self, x):
-        return x * self.scale
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class ImpalaCNN(nn.Module):
+    """
+    Implementation of the small variant of the IMPALA CNN introduced in Espeholt et al. (2018).
+    """
+    def __init__(self, depth, actions, linear_layer):
+        super().__init__()
+
+        self.main = nn.Sequential(
+            nn.Conv2d(in_channels=depth, out_channels=16, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),
+            nn.ReLU(),
+        )
+
+        self.pool = torch.nn.AdaptiveMaxPool2d((6, 6))
+        self.critic = nn.Sequential(linear_layer(1152, 256),
+                              nn.ReLU(),
+                              linear_layer(256, 1))
+        
+        self.actor = nn.Sequential(linear_layer(1152, 256),
+                              nn.ReLU(),
+                              linear_layer(256, actions))
+        self.flatten = nn.Flatten()
+
+    def forward(self, x):
+        x = self.main(x)
+        x = self.pool(x)
+        x = self.flatten(x)
+        return x
+
 class Agent(nn.Module):
     def __init__(self, envs, frames=1):
         super(Agent, self).__init__()
-        self.network = nn.Sequential(
-            Scale(1/255),
-            layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(2560, 512)),
-            nn.ReLU()
-        )
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
-
+        self.network = ImpalaCNN(frames, envs.action_space.n, nn.Linear)
+        
     def forward(self, x):
+        x /= 255
         return self.network(x)
 
     def get_action(self, x, action=None):
         x = self.forward(x)
-        value = self.critic(x)
-        logits = self.actor(x)
+        value = self.network.critic(x)
+        logits = self.network.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
         return value, action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x):
-        return self.critic(self.forward(x))
+        return self.network.critic(self.forward(x))
 
 agent = Agent(envs, args.channels).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
