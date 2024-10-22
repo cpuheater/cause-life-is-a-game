@@ -23,7 +23,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env-id', type=str, default="MiniGrid-MemoryS7-v0",
+    parser.add_argument('--env-id', type=str, default="MiniGrid-MemoryS9-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2e-3,
                         help='the learning rate of the optimizer')
@@ -47,7 +47,7 @@ if __name__ == "__main__":
                         help='scale reward')
     parser.add_argument('--rnn-hidden-size', type=int, default=256,
                         help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=64,
+    parser.add_argument('--seq-length', type=int, default=128,
                         help='seq length')
 
     # Algorithm specific arguments
