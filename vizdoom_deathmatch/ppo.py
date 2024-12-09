@@ -1,8 +1,14 @@
 # https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
 
 import numpy as np
+from collections import deque
+import gymnasium
+from gymnasium import spaces
+from gymnasium.spaces import Discrete, Box
 import cv2
-from vizdoom import gymnasium_wrapper
+from vizdoom import GameVariable, Button
+import skimage.transform
+import gymnasium
 
 cv2.ocl.setUseOpenCL(False)
 
@@ -12,31 +18,30 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-from vizdoom.vizdoom import GameVariable
-
+import vizdoom
 import argparse
 from distutils.util import strtobool
 import numpy as np
-import gymnasium
 import time
 import random
 import os
-from typing import Any
-
-AVAILABLE_ENVS = [env for env in gymnasium.envs.registry.keys() if "Vizdoom" in env]
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+from typing import Callable, Tuple, Dict, Optional
+from stable_baselines3.common import vec_env
+import itertools
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PPO agent')
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env_id', type=str, default="VizdoomDeathmatch-v0",
+    parser.add_argument('--env-id', type=str, default="deathmatch",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=20000000,
+    parser.add_argument('--total-timesteps', type=int, default=2000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -44,16 +49,18 @@ if __name__ == "__main__":
                         help='if toggled, cuda will not be enabled by default')
     parser.add_argument('--prod-mode', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='run the script in production mode and use wandb to log outputs')
-    parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
     parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=1,
+    parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--frame-skip', type=int, default=4,
+    parser.add_argument('--frame-skip', type=int, default=2,
                         help='frame skip')
+    parser.add_argument('--model-dir', type=str, default="models",
+                        help='')
 
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
@@ -90,6 +97,8 @@ if __name__ == "__main__":
                           help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
+    parser.add_argument('--channels', type=int, default=3,
+                        help="the number of channels")
 
     args = parser.parse_args()
     #if not args.seed:
@@ -98,109 +107,147 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-IMAGE_SHAPE = (64, 64)
+class ViZDoomEnv(gymnasium.Env):
 
-class ObservationWrapper(gymnasium.ObservationWrapper):
+    def __init__(self,
+                 game: vizdoom.DoomGame, channels = 1):
+        super(ViZDoomEnv, self).__init__()
+        h, w = game.get_screen_height(), game.get_screen_width()
+        IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
+        self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
 
-    def __init__(self, env, shape=IMAGE_SHAPE):
-        super().__init__(env)
-        self.image_shape = shape
-        self.image_shape_reverse = shape[::-1]
-        self.env.frame_skip = args.frame_skip
-        num_channels = env.observation_space["screen"].shape[-1]
-        new_shape = (num_channels, self.image_shape[0], self.image_shape[1])
-        self.observation_space = gymnasium.spaces.Box(0, 255, shape=new_shape, dtype=np.float32)
-        self.prev_health = None
-        self.prev_ammo = None
+        # Assign other variables
+        self.game = game
+        self.actions = self._get_actions()
+        self.action_space = spaces.Discrete(len(self.actions))
+        self.frame_skip = args.frame_skip
+        self.scale_reward = args.scale_reward
+        self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
+        self.state = self.empty_frame
+        self.channels = channels
+        self.prev_pos = None
 
-    def step(
-        self, action
-    ):
-        """Modifies the :attr:`env` after calling :meth:`step` using :meth:`self.observation` on the returned observations."""
-        observation, reward, terminated, truncated, info = self.env.step(action)
-        reward = min(reward, 1)
-        if reward > 1:
-            print(reward)
-        curr_kill, curr_health, curr_armor, curr_weapon, curr_ammo = self._handle_gamevariables(observation["gamevariables"])
-        reward = self.shape_reward(reward, curr_health, self.prev_health, curr_ammo, self.prev_ammo, curr_kill, self.prev_kill, curr_armor, self.prev_armor)
-        reward += self._compute_damage_reward()
-        reward += self._compute_distance_reward(*self._get_player_pos())
-        self.prev_kill = curr_kill
+    def get_health_reward(self):
+        curr_health = self.game.get_game_variable(GameVariable.HEALTH)
+        health = curr_health - self.prev_health
         self.prev_health = curr_health
-        self.prev_armor = curr_armor
-        self.prev_weapon = curr_weapon
-        self.prev_ammo = curr_ammo
-        return self.observation(observation), reward, terminated, truncated, info
+        return health * 0.2 if health < 0 else 0
 
-    def reset(
-        self, *, seed: int | None = None, options: dict[str, Any] | None = None
-        ):
-        """Modifies the :attr:`env` after calling :meth:`reset`, returning a modified observation using :meth:`self.observation`."""
-        obs, info = self.env.reset(seed=seed, options=options)
-        self.prev_kill, self.prev_health, self.prev_armor, self.prev_weapon, self.prev_ammo = self._handle_gamevariables(obs["gamevariables"])
-        self.prev_x, self.prev_y = self._get_player_pos()
-        self.prev_damage_dealt = self.game.get_game_variable(GameVariable.DAMAGECOUNT)
-        return self.observation(obs), info
+    def get_kill_reward(self):
+        curr_killcount = self.game.get_game_variable(GameVariable.KILLCOUNT)
+        killcount = curr_killcount - self.prev_killcount
+        self.prev_killcount = curr_killcount
+        return killcount * 100
 
-    def _get_player_pos(self):
-        return self.game.get_game_variable(GameVariable.POSITION_X), self.game.get_game_variable(
-            GameVariable.POSITION_Y)
-
-    def _compute_damage_reward(self):
-        damage_dealt = self.game.get_game_variable(GameVariable.DAMAGECOUNT)
-        print(f"damage_dealt: {damage_dealt} previous damage: {self.prev_damage_dealt}")
-        reward = 0.01 * (damage_dealt - self.prev_damage_dealt)
-        self.prev_damage_dealt = damage_dealt
-        if reward > 0:
-            print(reward)
-        return reward
-
-    def _compute_distance_reward(self, x, y):
-        reward_factor_distance = 5e-4
-        reward_threshold_distance = 3.0
-        dx = self.prev_x - x
-        dy = self.prev_y - y
-
-        distance = np.sqrt(dx ** 2 + dy ** 2)
-
-        if distance - reward_threshold_distance > 0:
-            reward = reward_factor_distance
+    def step(self, action: int):
+        info = {}
+        reward = self.game.make_action(self.actions[action], self.frame_skip)
+        done = self.game.is_episode_finished()
+        if done and reward > 0:
+            goal_reached = True
         else:
-            reward = -reward_factor_distance
+            goal_reached = False
+        self.state = self._get_frame(done)
+        #print(f"reward: {reward}, kill_reward: {self.get_kill_reward()}, health_reward: {self.get_health_reward()}, kill: {self.game.get_game_variable(GameVariable.KILLCOUNT)}")
+        reward += self.get_kill_reward() + self.get_health_reward()
+        reward = reward * self.scale_reward
+        #print(f"reward: {reward}")
+        self.total_reward += reward
+        self.total_length += 1
+        if done:
+            info['reward'] = self.total_reward
+            info['length'] = self.total_length
+            info['goal_reached'] = goal_reached
+        return self.state, reward, done, done, info
 
-        self.prev_x = x
-        self.prev_y = y
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
+        if seed is not None:
+            self.game.set_seed(seed)
+        self.game.new_episode()
+        self.state = self._get_frame()
+        self.prev_killcount = self.game.get_game_variable(GameVariable.KILLCOUNT)
+        self.prev_health = self.game.get_game_variable(GameVariable.HEALTH)
+        self.total_length = 0
+        self.total_reward = 0
+        return self.state, {}
 
-        return reward
+    def close(self) -> None:
+        self.game.close()
 
-    def _handle_gamevariables(self, variables):
-        kill = variables[0]
-        health = variables[1]
-        armor = variables[2]
-        weapon = variables[3]
-        ammo = variables[4]
-        return kill, health, armor, weapon, ammo
+    def render(self, mode='human'):
+        pass
 
-    def observation(self, observation):
-        observation = cv2.resize(observation["screen"], self.image_shape_reverse)
-        observation = observation.astype('float32')
-        return np.transpose(observation,(2,0,1))
+    def get_screen(self):
+        screen = self.game.get_state().screen_buffer
+        channels, h, w = self.observation_space.shape
+        screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
+        if screen.ndim == 2:
+            screen = np.expand_dims(screen, 0)
+        else:
+            screen = screen.transpose(2, 0, 1)
+        return screen
 
-    def shape_reward(self, r_t, curr_health, prev_health, curr_ammo, prev_ammo, curr_kill, prev_kill, curr_armor, prev_armor):
-        if (curr_health < prev_health):
-            r_t = r_t - 0.01
-        if (curr_health > prev_health):
-            r_t = r_t + 0.02
-        if (curr_ammo < prev_ammo):
-            r_t = r_t - 0.01
-        if (curr_ammo > prev_ammo):
-            r_t = r_t + 0.02
-        if (curr_armor > prev_armor):
-            r_t = r_t + 0.02
-        if (curr_armor < prev_armor):
-            r_t = r_t - 0.01
-        return r_t
+    def _get_frame(self, done: bool = False) -> np.ndarray:
+        return self.get_screen() if not done else self.empty_frame
 
+    def _get_actions(self):
+        MUTUALLY_EXCLUSIVE_GROUPS = [
+            [Button.MOVE_RIGHT, Button.MOVE_LEFT],
+            [Button.TURN_RIGHT, Button.TURN_LEFT],
+            [Button.MOVE_FORWARD, Button.MOVE_BACKWARD],
+        ]
+        EXCLUSIVE_BUTTONS = [Button.ATTACK]
+        def has_exclusive_button(actions: np.ndarray, buttons: np.array) -> np.array:
+            exclusion_mask = np.isin(buttons, EXCLUSIVE_BUTTONS)
+            return (np.any(actions.astype(bool) & exclusion_mask, axis=-1)) & (np.sum(actions, axis=-1) > 1)
+
+        def has_excluded_pair(actions: np.ndarray, buttons: np.array) -> np.array:
+            mutual_exclusion_mask = np.array([np.isin(buttons, excluded_group)
+                                      for excluded_group in MUTUALLY_EXCLUSIVE_GROUPS])
+            return np.any(np.sum(
+                (actions[:, np.newaxis, :] * mutual_exclusion_mask.astype(int)),
+                axis=-1) > 1, axis=-1)
+
+
+        def get_available_actions(buttons: np.array):
+            action_combinations = np.array([list(seq) for seq in itertools.product([0., 1.], repeat=len(buttons))])
+
+            illegal_mask = (has_excluded_pair(action_combinations, buttons)
+                    | has_exclusive_button(action_combinations, buttons))
+
+            possible_actions = action_combinations[~illegal_mask]
+            possible_actions = possible_actions[np.sum(possible_actions, axis=1) > 0]
+            return possible_actions.tolist()
+
+        possible_actions = get_available_actions(np.array([
+            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_BACKWARD, Button.MOVE_LEFT,
+            Button.MOVE_RIGHT, Button.ATTACK]))
+        return possible_actions
+
+class VecPyTorch(VecEnvWrapper):
+    def __init__(self, venv, device):
+        super(VecPyTorch, self).__init__(venv)
+        self.device = device
+
+    def reset(self):
+        obs  = self.venv.reset()
+        obs = torch.from_numpy(obs).float().to(self.device)
+        return obs
+
+    def step_async(self, actions):
+        actions = actions.cpu().numpy()
+        self.venv.step_async(actions)
+
+    def step_wait(self):
+        obs, reward, done, info = self.venv.step_wait()
+        #done = np.logical_or(terminations, truncations)
+        obs = torch.from_numpy(obs).float().to(self.device)
+        reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
+        return obs, reward, done, info
+
+
+# TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
@@ -210,32 +257,31 @@ if args.prod_mode:
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
     writer = SummaryWriter(f"/tmp/{experiment_name}")
 
+# TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
-import vizdoom.vizdoom as vzd
-
-def make_env(env_id, idx, capture_video, run_name):
+def create_env() -> ViZDoomEnv:
     def thunk():
-        if capture_video and idx == 0:
-            env = gymnasium.make(env_id, render_mode="rgb_array")
-
-            env = gymnasium.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gymnasium.make(env_id)
-        env = gymnasium.wrappers.RecordEpisodeStatistics(env)
-        env = gymnasium.wrappers.TransformReward(env, lambda r: r * args.scale_reward)
-        return ObservationWrapper(env)
+        game = vizdoom.DoomGame()
+        game.load_config(f'scenarios/{args.env_id}.cfg')
+        game.set_window_visible(True)
+        game.init()
+        # Wrap the game with the Gym adapter.
+        return ViZDoomEnv(game, channels=args.channels)
     return thunk
 
-envs = gymnasium.vector.AsyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, experiment_name) for i in range(args.num_envs)],
-    )
+#envs = VecPyTorch(DummyVecEnv([create_env(**kwargs) for i in range(args.num_envs)]), device)
 
-assert isinstance(envs.single_action_space['binary'], gymnasium.spaces.Discrete), "only discrete action space is supported"
+envs = VecPyTorch(
+         SubprocVecEnv([create_env() for i in range(args.num_envs)], "fork"),
+         device
+     )
+assert isinstance(envs.action_space, gymnasium.spaces.discrete.Discrete), "only discrete action space is supported"
+
 # ALGO LOGIC: initialize agent here:
 class Scale(nn.Module):
     def __init__(self, scale):
@@ -251,7 +297,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3):
+    def __init__(self, envs, frames=1):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
             Scale(1/255),
@@ -262,10 +308,10 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(1024, 512)),
+            layer_init(nn.Linear(2560, 512)),
             nn.ReLU()
         )
-        self.actor = layer_init(nn.Linear(512, envs.single_action_space['binary'].n-1), std=0.01)
+        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def forward(self, x):
@@ -278,21 +324,20 @@ class Agent(nn.Module):
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-            action += 1
-        return value, action, probs.log_prob(action - 1), probs.entropy()
+        return value, action, probs.log_prob(action), probs.entropy()
 
     def get_value(self, x):
         return self.critic(self.forward(x))
 
-agent = Agent(envs).to(device)
+agent = Agent(envs, args.channels).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
-obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space['binary'].shape).to(device)
+obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -300,11 +345,11 @@ values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
+goals = []
 start_time = time.time()
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
-next_obs, _ = envs.reset(seed=args.seed)
-next_obs = torch.Tensor(next_obs).to(device)
+next_obs = envs.reset()
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
 for update in range(1, num_updates+1):
@@ -329,23 +374,26 @@ for update in range(1, num_updates+1):
         logprobs[step] = logproba
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        from collections import OrderedDict
+        next_obs, rs, ds, infos = envs.step(action)
+        rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
-        action_dict = OrderedDict([('binary', action.cpu().numpy()), ('continuous', np.array([[],[]]))])
-        sample_action = envs.action_space.sample()
-        sample_action['binary'] = action.cpu().numpy()
-        next_obs, reward, terminations, truncations, infos = envs.step(sample_action)
-        print(reward)
-        next_done = np.logical_or(terminations, truncations)
-        rewards[step] = torch.tensor(reward).to(device).view(-1)
-        next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+        #for info in infos:
+        #    if 'episode' in info.keys():
+        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+        #        break
+        for info in infos:
+            if 'reward' in info.keys():
+                print(f"global_step={global_step}, episodic_return={info['reward']}")
+                writer.add_scalar("charts/episodic_return", info['reward'], global_step)
+            if 'length' in info.keys():
+                writer.add_scalar("charts/episodic_length", info['length'], global_step)
+            if 'goal_reached' in info.keys():
+                goals.append(info['goal_reached'])
+                if len(goals) == args.num_envs:
+                    writer.add_scalar("charts/goal_reached", sum(goals), global_step)
+                    goals = []
 
-        if "final_info" in infos:
-            for info in infos["final_info"]:
-                if info and "episode" in info:
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                    writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
@@ -376,19 +424,17 @@ for update in range(1, num_updates+1):
             advantages = returns - values
 
     # flatten the batch
-    b_obs = obs.reshape((-1,)+envs.single_observation_space.shape)
+    b_obs = obs.reshape((-1,)+envs.observation_space.shape)
     b_logprobs = logprobs.reshape(-1)
-    b_actions = actions.reshape((-1,)+envs.single_action_space['binary'].shape)
+    b_actions = actions.reshape((-1,)+envs.action_space.shape)
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
 
     # Optimizaing the policy and value network
-    target_agent = Agent(envs).to(device)
     inds = np.arange(args.batch_size,)
     for i_epoch_pi in range(args.update_epochs):
         np.random.shuffle(inds)
-        target_agent.load_state_dict(agent.state_dict())
         for start in range(0, args.batch_size, args.minibatch_size):
             end = start + args.minibatch_size
             minibatch_ind = inds[start:end]
@@ -429,10 +475,6 @@ for update in range(1, num_updates+1):
         if args.kle_stop:
             if approx_kl > args.target_kl:
                 break
-        if args.kle_rollback:
-            if (b_logprobs[minibatch_ind] - agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])[1]).mean() > args.target_kl:
-                agent.load_state_dict(target_agent.state_dict())
-                break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
@@ -443,6 +485,8 @@ for update in range(1, num_updates+1):
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
     writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
+
+torch.save(agent, f"agent_{args.total_timesteps}.pt")
 
 envs.close()
 writer.close()

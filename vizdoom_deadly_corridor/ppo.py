@@ -41,7 +41,7 @@ if __name__ == "__main__":
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total-timesteps', type=int, default=2000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -57,8 +57,10 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--frame-skip', type=int, default=4,
+    parser.add_argument('--frame-skip', type=int, default=2,
                         help='frame skip')
+    parser.add_argument('--model-dir', type=str, default="models",
+                        help='')
 
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
@@ -129,14 +131,14 @@ class ViZDoomEnv(gymnasium.Env):
         curr_health = self.game.get_game_variable(GameVariable.HEALTH)
         health = curr_health - self.prev_health
         self.prev_health = curr_health
-        return health * 0.5 if health < 0 else 0
+        return health * 0.2 if health < 0 else 0
 
     def get_kill_reward(self):
         curr_killcount = self.game.get_game_variable(GameVariable.KILLCOUNT)
         killcount = curr_killcount - self.prev_killcount
         self.prev_killcount = curr_killcount
-        return killcount * 10    
-        
+        return killcount * 100
+
     def step(self, action: int):
         info = {}
         reward = self.game.make_action(self.actions[action], self.frame_skip)
@@ -146,9 +148,10 @@ class ViZDoomEnv(gymnasium.Env):
         else:
             goal_reached = False
         self.state = self._get_frame(done)
-        #print(f"reward: {reward}, kill_reward: {self.get_kill_reward()}, health_reward: {self.get_health_reward()}")
+        #print(f"reward: {reward}, kill_reward: {self.get_kill_reward()}, health_reward: {self.get_health_reward()}, kill: {self.game.get_game_variable(GameVariable.KILLCOUNT)}")
         reward += self.get_kill_reward() + self.get_health_reward()
         reward = reward * self.scale_reward
+        #print(f"reward: {reward}")
         self.total_reward += reward
         self.total_length += 1
         if done:
@@ -166,7 +169,7 @@ class ViZDoomEnv(gymnasium.Env):
         self.prev_killcount = self.game.get_game_variable(GameVariable.KILLCOUNT)
         self.prev_health = self.game.get_game_variable(GameVariable.HEALTH)
         self.total_length = 0
-        self.total_reward = 0    
+        self.total_reward = 0
         return self.state, {}
 
     def close(self) -> None:
@@ -182,12 +185,12 @@ class ViZDoomEnv(gymnasium.Env):
         if screen.ndim == 2:
             screen = np.expand_dims(screen, 0)
         else:
-            screen = screen.transpose(2, 0, 1)    
+            screen = screen.transpose(2, 0, 1)
         return screen
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
         return self.get_screen() if not done else self.empty_frame
-    
+
     def _get_actions(self):
         MUTUALLY_EXCLUSIVE_GROUPS = [
             [Button.MOVE_RIGHT, Button.MOVE_LEFT],
@@ -196,11 +199,11 @@ class ViZDoomEnv(gymnasium.Env):
         ]
         EXCLUSIVE_BUTTONS = [Button.ATTACK]
         def has_exclusive_button(actions: np.ndarray, buttons: np.array) -> np.array:
-            exclusion_mask = np.isin(buttons, EXCLUSIVE_BUTTONS)    
+            exclusion_mask = np.isin(buttons, EXCLUSIVE_BUTTONS)
             return (np.any(actions.astype(bool) & exclusion_mask, axis=-1)) & (np.sum(actions, axis=-1) > 1)
-        
+
         def has_excluded_pair(actions: np.ndarray, buttons: np.array) -> np.array:
-            mutual_exclusion_mask = np.array([np.isin(buttons, excluded_group) 
+            mutual_exclusion_mask = np.array([np.isin(buttons, excluded_group)
                                       for excluded_group in MUTUALLY_EXCLUSIVE_GROUPS])
             return np.any(np.sum(
                 (actions[:, np.newaxis, :] * mutual_exclusion_mask.astype(int)),
@@ -218,10 +221,10 @@ class ViZDoomEnv(gymnasium.Env):
             return possible_actions.tolist()
 
         possible_actions = get_available_actions(np.array([
-            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT, 
+            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT,
             Button.MOVE_RIGHT, Button.ATTACK]))
         return possible_actions
-    
+
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
         super(VecPyTorch, self).__init__(venv)
@@ -390,7 +393,7 @@ for update in range(1, num_updates+1):
                 if len(goals) == args.num_envs:
                     writer.add_scalar("charts/goal_reached", sum(goals), global_step)
                     goals = []
-             
+
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
@@ -431,7 +434,7 @@ for update in range(1, num_updates+1):
     # Optimizaing the policy and value network
     inds = np.arange(args.batch_size,)
     for i_epoch_pi in range(args.update_epochs):
-        np.random.shuffle(inds)        
+        np.random.shuffle(inds)
         for start in range(0, args.batch_size, args.minibatch_size):
             end = start + args.minibatch_size
             minibatch_ind = inds[start:end]
@@ -482,6 +485,8 @@ for update in range(1, num_updates+1):
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
     writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
+
+torch.save(agent, f"agent_{args.total_timesteps}.pt")
 
 envs.close()
 writer.close()
