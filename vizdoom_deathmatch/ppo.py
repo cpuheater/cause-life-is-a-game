@@ -221,8 +221,10 @@ class ViZDoomEnv(gymnasium.Env):
             return possible_actions.tolist()
 
         possible_actions = get_available_actions(np.array([
-            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_BACKWARD, Button.MOVE_LEFT,
-            Button.MOVE_RIGHT, Button.ATTACK]))
+            Button.ATTACK, Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD,
+            Button.MOVE_BACKWARD, Button.MOVE_LEFT, Button.MOVE_RIGHT
+            ]))
+
         return possible_actions
 
 class VecPyTorch(VecEnvWrapper):
