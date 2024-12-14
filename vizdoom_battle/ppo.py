@@ -35,7 +35,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env-id', type=str, default="monsters",
+    parser.add_argument('--env-id', type=str, default="battle",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -137,6 +137,12 @@ class ViZDoomEnv(gymnasium.Env):
         self.channels = channels
         self.prev_pos = None
 
+    def get_health_reward(self):
+        curr_health = self.game.get_game_variable(GameVariable.HEALTH)
+        health = curr_health - self.prev_health
+        self.prev_health = curr_health
+        return health * 0.2
+
     def get_distance(self):
         curr_position = [self.game.get_game_variable(GameVariable.POSITION_X), self.game.get_game_variable(GameVariable.POSITION_Y)]
         dist = np.linalg.norm(np.array(curr_position) - np.array(self.prev_pos))
@@ -160,8 +166,8 @@ class ViZDoomEnv(gymnasium.Env):
         reward = self.game.make_action(self.actions[action], self.frame_skip)
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
-        #print(f"reward: {reward}, kill_reward: {self.get_kill_reward()}, distance: {self.get_distance()}, killcount: {self.game.get_game_variable(GameVariable.KILLCOUNT)}")
-        reward += self.get_kill_reward() + self.get_distance() + self.get_ammo_reward()
+        #print(f"reward: {reward}, kill_reward: {self.get_kill_reward()}, distance: {self.get_distance()}, health_reward: {self.get_health_reward()}, ammo_reward: {self.get_ammo_reward()}")
+        reward += self.get_kill_reward() + self.get_distance() + self.get_health_reward() + self.get_ammo_reward()
         reward = reward * self.scale_reward
         #print(f"reward: {reward}")
         self.total_reward += reward
@@ -179,6 +185,7 @@ class ViZDoomEnv(gymnasium.Env):
         self.state = self._get_frame()
         self.prev_killcount = self.game.get_game_variable(GameVariable.KILLCOUNT)
         self.prev_pos = [self.game.get_game_variable(GameVariable.POSITION_X), self.game.get_game_variable(GameVariable.POSITION_Y)]
+        self.prev_health = self.game.get_game_variable(GameVariable.HEALTH)
         self.prev_ammo = self.game.get_game_variable(GameVariable.AMMO2)
         self.total_length = 0
         self.total_reward = 0
@@ -485,7 +492,7 @@ if __name__ == "__main__":
             writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
         writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
 
-    torch.save(agent, f"agent_{args.total_timesteps}_{time.time()}.pt")
+    torch.save(agent, f"agent_{args.total_timesteps}.pt")
 
     envs.close()
     writer.close()

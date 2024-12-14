@@ -19,13 +19,13 @@ from vizdoom import GameVariable, Button
 
 @dataclass
 class Args:
-    env_id: str = "monsters"
+    env_id: str = "battle"
     """the id of the environment"""
     num_actions: int = 12
     """num actions"""
     num_episodes: int = 5
     """"""
-    model_file: str = "agent_2000000_1734191741.8600583.pt"
+    model_file: str = "agent_2000000.pt"
     """"""
     skip_frame: int = 2
     """"""
