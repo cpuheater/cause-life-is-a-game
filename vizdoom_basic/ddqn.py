@@ -247,7 +247,7 @@ print(q_network)
 start_time = time.time()
 
 # TRY NOT TO MODIFY: start the game
-obs, _ = env.reset()
+obs, _ = env.reset(seed=args.seed)
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
