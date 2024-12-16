@@ -79,6 +79,8 @@ class ViZDoomEnv(gymnasium.Env):
         screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
         if screen.ndim == 2:
             screen = np.expand_dims(screen, 0)
+        else:
+            screen = screen.transpose(2, 0, 1)
         return screen
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
@@ -129,7 +131,7 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--channels', type=int, default=1,
+    parser.add_argument('--channels', type=int, default=3,
                         help="the number of channels")
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
@@ -156,7 +158,7 @@ if __name__ == "__main__":
     parser.add_argument('--train-frequency', type=int, default=4,
                         help="the frequency of training")
     parser.add_argument('--n-step', type=int, default=4,
-                        help="")  
+                        help="")
     args = parser.parse_args()
     #if not args.seed:
     args.seed = int(time.time())
@@ -174,7 +176,6 @@ if args.prod_mode:
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 frame_repeat = 4
-frames = 1
 env = create_env()
 
 random.seed(args.seed)
@@ -243,7 +244,7 @@ class ReplayBufferNStep(object):
             rewards.append(reward)
             obses_tp1.append(np.array(obs_tp1, copy=False))
             dones.append(done)
-        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)    
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -277,14 +278,14 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 #rb = ReplayBuffer(args.buffer_size)
 rb = ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
-q_network = QNetwork(env.action_space.n, frames).to(device)
-target_network = QNetwork(env.action_space.n, frames).to(device)
+q_network = QNetwork(env.action_space.n, args.channels).to(device)
+target_network = QNetwork(env.action_space.n, args.channels).to(device)
 target_network.load_state_dict(q_network.state_dict())
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
 print(device.__repr__())
 print(q_network)
-start_time = time()
+start_time = time.time()
 
 # TRY NOT TO MODIFY: start the game
 obs, _ = env.reset()
@@ -332,7 +333,7 @@ for global_step in range(args.total_timesteps):
     # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
     if done:
        obs, _ = env.reset(seed=args.seed)
-    else:        
+    else:
        obs = next_obs
 
 

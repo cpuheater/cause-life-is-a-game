@@ -53,7 +53,7 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 5000000
     """total timesteps of the experiments"""
-    buffer_size: int = int(1e5)
+    buffer_size: int = int(1e4)
     """the replay memory buffer size"""  # smaller than in original paper but evaluation is done only for 100k steps anyway
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -81,7 +81,7 @@ class Args:
     """the number of channels"""
     frame_skip: int = 3
     """frame skip"""
-    scale_reward: float=1
+    scale_reward: float=0.01
     'scale reward'
 
 
@@ -154,14 +154,12 @@ class ViZDoomEnv(gymnasium.Env):
 
 
 def create_env() -> ViZDoomEnv:
-    def thunk():
-        game = vizdoom.DoomGame()
-        game.load_config(f'scenarios/{args.env_id}.cfg')
-        game.set_window_visible(True)
-        game.init()
-        # Wrap the game with the Gym adapter.
-        return ViZDoomEnv(game, channels=args.channels)
-    return thunk
+    game = vizdoom.DoomGame()
+    game.load_config(f'scenarios/{args.env_id}.cfg')
+    game.set_window_visible(True)
+    game.init()
+    # Wrap the game with the Gym adapter.
+    return ViZDoomEnv(game, channels=args.channels)
 
 
 def layer_init(layer, bias_const=0.0):
@@ -177,7 +175,7 @@ def layer_init(layer, bias_const=0.0):
 class SoftQNetwork(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        obs_shape = envs.single_observation_space.shape
+        obs_shape = envs.observation_space.shape
         self.conv = nn.Sequential(
             layer_init(nn.Conv2d(obs_shape[0], 32, kernel_size=8, stride=4)),
             nn.ReLU(),
@@ -191,7 +189,7 @@ class SoftQNetwork(nn.Module):
             output_dim = self.conv(torch.zeros(1, *obs_shape)).shape[1]
 
         self.fc1 = layer_init(nn.Linear(output_dim, 512))
-        self.fc_q = layer_init(nn.Linear(512, envs.single_action_space.n))
+        self.fc_q = layer_init(nn.Linear(512, envs.action_space.n))
 
     def forward(self, x):
         x = F.relu(self.conv(x / 255.0))
@@ -203,7 +201,7 @@ class SoftQNetwork(nn.Module):
 class Actor(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        obs_shape = envs.single_observation_space.shape
+        obs_shape = envs.observation_space.shape
         self.conv = nn.Sequential(
             layer_init(nn.Conv2d(obs_shape[0], 32, kernel_size=8, stride=4)),
             nn.ReLU(),
@@ -217,7 +215,7 @@ class Actor(nn.Module):
             output_dim = self.conv(torch.zeros(1, *obs_shape)).shape[1]
 
         self.fc1 = layer_init(nn.Linear(output_dim, 512))
-        self.fc_logits = layer_init(nn.Linear(512, envs.single_action_space.n))
+        self.fc_logits = layer_init(nn.Linear(512, envs.action_space.n))
 
     def forward(self, x):
         x = F.relu(self.conv(x))
@@ -268,8 +266,8 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gymnasium.vector.SyncVectorEnv([create_env()])
-    assert isinstance(envs.single_action_space, gymnasium.spaces.Discrete), "only discrete action space is supported"
+    envs = create_env()
+    assert isinstance(envs.action_space, gymnasium.spaces.Discrete), "only discrete action space is supported"
 
     actor = Actor(envs).to(device)
     qf1 = SoftQNetwork(envs).to(device)
@@ -284,7 +282,7 @@ if __name__ == "__main__":
 
     # Automatic entropy tuning
     if args.autotune:
-        target_entropy = -args.target_entropy_scale * torch.log(1 / torch.tensor(envs.single_action_space.n))
+        target_entropy = -args.target_entropy_scale * torch.log(1 / torch.tensor(envs.action_space.n))
         log_alpha = torch.zeros(1, requires_grad=True, device=device)
         alpha = log_alpha.exp().item()
         a_optimizer = optim.Adam([log_alpha], lr=args.q_lr, eps=1e-4)
@@ -293,8 +291,8 @@ if __name__ == "__main__":
 
     rb = ReplayBuffer(
         args.buffer_size,
-        envs.single_observation_space,
-        envs.single_action_space,
+        envs.observation_space,
+        envs.action_space,
         device,
         handle_timeout_termination=False,
     )
@@ -305,28 +303,25 @@ if __name__ == "__main__":
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
-            actions = np.array([envs.single_action_space.sample()])
+            actions = np.array([envs.action_space.sample()])
         else:
-            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
+            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device).unsqueeze(0))
             actions = actions.detach().cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rewards, done, done, infos = envs.step(actions)
+        next_obs, rewards, done, done, info = envs.step(actions[0])
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
 
-        if "final_info" in infos:
-            for info in infos["final_info"]:
-                # Skip the envs that are not done
-                if 'reward' in info.keys():
-                    print(f"global_step={global_step}, episodic_return={info['reward']}")
-                    writer.add_scalar("charts/episodic_return", info['reward'], global_step)
-                if 'length' in info.keys():
-                    writer.add_scalar("charts/episodic_length", info['length'], global_step)
+        if 'reward' in info.keys():
+            print(f"global_step={global_step}, episodic_return={info['reward']}")
+            writer.add_scalar("charts/episodic_return", info['reward'], global_step)
+        if 'length' in info.keys():
+            writer.add_scalar("charts/episodic_length", info['length'], global_step)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
-        rb.add(obs, real_next_obs, actions, rewards, done, infos)
+        rb.add(obs, real_next_obs, actions, rewards, done, info)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -402,8 +397,8 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                 if args.autotune:
                     writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
-       # if done:
-       #     obs, _ = envs.reset()
+        if done:
+            obs, _ = envs.reset()
 
     envs.close()
     writer.close()

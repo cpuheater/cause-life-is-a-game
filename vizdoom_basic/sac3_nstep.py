@@ -28,6 +28,7 @@ import itertools
 from gymnasium import spaces
 from gymnasium.spaces import Discrete, Box
 from typing import Optional
+from collections import deque
 
 @dataclass
 class Args:
@@ -83,6 +84,47 @@ class Args:
     """frame skip"""
     scale_reward: float=1
     'scale reward'
+    n_step: int = 3
+    """"""
+
+class ReplayBufferNStep(object):
+    def __init__(self, size, n_step, gamma):
+        self._storage = deque(maxlen=size)
+        self._maxsize = size
+        self.n_step_buffer = deque(maxlen=n_step)
+        self.gamma = gamma
+        self.n_step = n_step
+
+    def __len__(self):
+        return len(self._storage)
+
+    def get_n_step(self):
+        _, _, reward, next_observation, done = self.n_step_buffer[-1]
+        for _, _, r, next_obs, do in reversed(list(self.n_step_buffer)[:-1]):
+            reward = self.gamma * reward * (1 - do) + r
+            next_observation, done = (next_obs, do) if do else (next_observation, done)
+        return reward, next_observation, done
+
+    def add(self, obs, action, reward, next_obs, done):
+        self.n_step_buffer.append((obs, action, reward, next_obs, done))
+        if len(self.n_step_buffer) < self.n_step:
+            return
+        reward, next_obs, done = self.get_n_step()
+        obs, action, _, _, _ = self.n_step_buffer[0]
+        self._storage.append([obs, action, reward, next_obs, done])
+
+    def sample(self, batch_size):
+        idxes = np.random.choice(len(self._storage), batch_size, replace=True)
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, reward, obs_tp1, done = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1, copy=False))
+            dones.append(done)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
 
 class ViZDoomEnv(gymnasium.Env):
@@ -154,14 +196,13 @@ class ViZDoomEnv(gymnasium.Env):
 
 
 def create_env() -> ViZDoomEnv:
-    def thunk():
-        game = vizdoom.DoomGame()
-        game.load_config(f'scenarios/{args.env_id}.cfg')
-        game.set_window_visible(True)
-        game.init()
-        # Wrap the game with the Gym adapter.
-        return ViZDoomEnv(game, channels=args.channels)
-    return thunk
+    game = vizdoom.DoomGame()
+    game.load_config(f'scenarios/{args.env_id}.cfg')
+    game.set_window_visible(True)
+    game.init()
+    # Wrap the game with the Gym adapter.
+    return ViZDoomEnv(game, channels=args.channels)
+
 
 
 def layer_init(layer, bias_const=0.0):
@@ -177,7 +218,7 @@ def layer_init(layer, bias_const=0.0):
 class SoftQNetwork(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        obs_shape = envs.single_observation_space.shape
+        obs_shape = envs.observation_space.shape
         self.conv = nn.Sequential(
             layer_init(nn.Conv2d(obs_shape[0], 32, kernel_size=8, stride=4)),
             nn.ReLU(),
@@ -191,7 +232,7 @@ class SoftQNetwork(nn.Module):
             output_dim = self.conv(torch.zeros(1, *obs_shape)).shape[1]
 
         self.fc1 = layer_init(nn.Linear(output_dim, 512))
-        self.fc_q = layer_init(nn.Linear(512, envs.single_action_space.n))
+        self.fc_q = layer_init(nn.Linear(512, envs.action_space.n))
 
     def forward(self, x):
         x = F.relu(self.conv(x / 255.0))
@@ -203,7 +244,7 @@ class SoftQNetwork(nn.Module):
 class Actor(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        obs_shape = envs.single_observation_space.shape
+        obs_shape = envs.observation_space.shape
         self.conv = nn.Sequential(
             layer_init(nn.Conv2d(obs_shape[0], 32, kernel_size=8, stride=4)),
             nn.ReLU(),
@@ -217,7 +258,7 @@ class Actor(nn.Module):
             output_dim = self.conv(torch.zeros(1, *obs_shape)).shape[1]
 
         self.fc1 = layer_init(nn.Linear(output_dim, 512))
-        self.fc_logits = layer_init(nn.Linear(512, envs.single_action_space.n))
+        self.fc_logits = layer_init(nn.Linear(512, envs.action_space.n))
 
     def forward(self, x):
         x = F.relu(self.conv(x))
@@ -268,8 +309,8 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gymnasium.vector.SyncVectorEnv([create_env()])
-    assert isinstance(envs.single_action_space, gymnasium.spaces.Discrete), "only discrete action space is supported"
+    envs = create_env()
+    assert isinstance(envs.action_space, gymnasium.spaces.Discrete), "only discrete action space is supported"
 
     actor = Actor(envs).to(device)
     qf1 = SoftQNetwork(envs).to(device)
@@ -284,20 +325,15 @@ if __name__ == "__main__":
 
     # Automatic entropy tuning
     if args.autotune:
-        target_entropy = -args.target_entropy_scale * torch.log(1 / torch.tensor(envs.single_action_space.n))
+        target_entropy = -args.target_entropy_scale * torch.log(1 / torch.tensor(envs.action_space.n))
         log_alpha = torch.zeros(1, requires_grad=True, device=device)
         alpha = log_alpha.exp().item()
         a_optimizer = optim.Adam([log_alpha], lr=args.q_lr, eps=1e-4)
     else:
         alpha = args.alpha
 
-    rb = ReplayBuffer(
-        args.buffer_size,
-        envs.single_observation_space,
-        envs.single_action_space,
-        device,
-        handle_timeout_termination=False,
-    )
+    rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
+
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
@@ -305,28 +341,25 @@ if __name__ == "__main__":
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
-            actions = np.array([envs.single_action_space.sample()])
+            actions = np.array([envs.action_space.sample()])
         else:
-            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
+            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device).unsqueeze(0))
             actions = actions.detach().cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rewards, done, done, infos = envs.step(actions)
+        next_obs, rewards, done, done, info = envs.step(actions[0])
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
 
-        if "final_info" in infos:
-            for info in infos["final_info"]:
-                # Skip the envs that are not done
-                if 'reward' in info.keys():
-                    print(f"global_step={global_step}, episodic_return={info['reward']}")
-                    writer.add_scalar("charts/episodic_return", info['reward'], global_step)
-                if 'length' in info.keys():
-                    writer.add_scalar("charts/episodic_length", info['length'], global_step)
+        if 'reward' in info.keys():
+            print(f"global_step={global_step}, episodic_return={info['reward']}")
+            writer.add_scalar("charts/episodic_return", info['reward'], global_step)
+        if 'length' in info.keys():
+            writer.add_scalar("charts/episodic_length", info['length'], global_step)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
-        rb.add(obs, real_next_obs, actions, rewards, done, infos)
+        rb.add(obs, actions, rewards, real_next_obs, done)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -334,25 +367,25 @@ if __name__ == "__main__":
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             if global_step % args.update_frequency == 0:
-                data = rb.sample(args.batch_size)
+                s_obs, s_actions, s_rewards, s_next_obses, s_dones = tuple(map(lambda e: torch.as_tensor(e, device=device), rb.sample(args.batch_size)))
                 # CRITIC training
                 with torch.no_grad():
-                    _, next_state_log_pi, next_state_action_probs = actor.get_action(data.next_observations)
-                    qf1_next_target = qf1_target(data.next_observations)
-                    qf2_next_target = qf2_target(data.next_observations)
+                    _, next_state_log_pi, next_state_action_probs = actor.get_action(s_next_obses)
+                    qf1_next_target = qf1_target(s_next_obses)
+                    qf2_next_target = qf2_target(s_next_obses)
                     # we can use the action probabilities instead of MC sampling to estimate the expectation
                     min_qf_next_target = next_state_action_probs * (
                         torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                     )
                     # adapt Q-target for discrete Q-function
                     min_qf_next_target = min_qf_next_target.sum(dim=1)
-                    next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target)
+                    next_q_value = s_rewards.float().flatten() + (1 - s_dones.int().flatten()) * (args.gamma ** args.n_step) * (min_qf_next_target)
 
                 # use Q-values only for the taken actions
-                qf1_values = qf1(data.observations)
-                qf2_values = qf2(data.observations)
-                qf1_a_values = qf1_values.gather(1, data.actions.long()).view(-1)
-                qf2_a_values = qf2_values.gather(1, data.actions.long()).view(-1)
+                qf1_values = qf1(s_obs)
+                qf2_values = qf2(s_obs)
+                qf1_a_values = qf1_values.gather(1, s_actions.long()).view(-1)
+                qf2_a_values = qf2_values.gather(1, s_actions.long()).view(-1)
                 qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
                 qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
                 qf_loss = qf1_loss + qf2_loss
@@ -362,10 +395,10 @@ if __name__ == "__main__":
                 q_optimizer.step()
 
                 # ACTOR training
-                _, log_pi, action_probs = actor.get_action(data.observations)
+                _, log_pi, action_probs = actor.get_action(s_obs)
                 with torch.no_grad():
-                    qf1_values = qf1(data.observations)
-                    qf2_values = qf2(data.observations)
+                    qf1_values = qf1(s_obs)
+                    qf2_values = qf2(s_obs)
                     min_qf_values = torch.min(qf1_values, qf2_values)
                 # no need for reparameterization, the expectation can be calculated for discrete actions
                 actor_loss = (action_probs * ((alpha * log_pi) - min_qf_values)).mean()
@@ -402,8 +435,8 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                 if args.autotune:
                     writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
-       # if done:
-       #     obs, _ = envs.reset()
+        if done:
+           obs, _ = envs.reset()
 
     envs.close()
     writer.close()

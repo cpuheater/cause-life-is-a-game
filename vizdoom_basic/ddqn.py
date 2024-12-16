@@ -79,6 +79,8 @@ class ViZDoomEnv(gymnasium.Env):
         screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
         if screen.ndim == 2:
             screen = np.expand_dims(screen, 0)
+        else:
+            screen = screen.transpose(2, 0, 1)
         return screen
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
@@ -129,7 +131,7 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--channels', type=int, default=1,
+    parser.add_argument('--channels', type=int, default=3,
                         help="the number of channels")
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
@@ -154,7 +156,7 @@ if __name__ == "__main__":
     parser.add_argument('--learning-starts', type=int, default=800,
                         help="timestep to start learning")
     parser.add_argument('--train-frequency', type=int, default=4,
-                        help="the frequency of training")  
+                        help="the frequency of training")
     args = parser.parse_args()
     #if not args.seed:
     args.seed = int(time.time())
@@ -235,8 +237,8 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 
 rb = ReplayBuffer(args.buffer_size)
-q_network = QNetwork(env.action_space.n, frames).to(device)
-target_network = QNetwork(env.action_space.n, frames).to(device)
+q_network = QNetwork(env.action_space.n, args.channels).to(device)
+target_network = QNetwork(env.action_space.n, args.channels).to(device)
 target_network.load_state_dict(q_network.state_dict())
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
@@ -290,7 +292,7 @@ for global_step in range(args.total_timesteps):
     # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
     if done:
        obs, _ = env.reset()
-    else:        
+    else:
        obs = next_obs
 
 
