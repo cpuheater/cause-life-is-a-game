@@ -63,9 +63,9 @@ class Args:
     """the batch size of sample from the reply memory"""
     learning_starts: int = 2e4
     """timestep to start learning"""
-    policy_lr: float = 3e-4
+    policy_lr: float = 3e-3
     """the learning rate of the policy network optimizer"""
-    q_lr: float = 3e-4
+    q_lr: float = 3e-3
     """the learning rate of the Q network network optimizer"""
     update_frequency: int = 3
     """the frequency of training updates"""
@@ -81,7 +81,7 @@ class Args:
     """the number of channels"""
     frame_skip: int = 3
     """frame skip"""
-    scale_reward: float=0.01
+    scale_reward: float=1
     'scale reward'
 
 

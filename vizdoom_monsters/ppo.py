@@ -318,7 +318,7 @@ if __name__ == "__main__":
         def thunk():
             game = vizdoom.DoomGame()
             game.load_config(f'scenarios/{args.env_id}.cfg')
-            game.set_window_visible(True)
+            game.set_window_visible(False)
             game.init()
             # Wrap the game with the Gym adapter.
             return ViZDoomEnv(game, channels=args.channels)

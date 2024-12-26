@@ -141,7 +141,7 @@ class ViZDoomEnv(gymnasium.Env):
         curr_health = self.game.get_game_variable(GameVariable.HEALTH)
         health = curr_health - self.prev_health
         self.prev_health = curr_health
-        return health * 0.2
+        return health * 0.2 if health < 0 else health * 1
 
     def get_distance(self):
         curr_position = [self.game.get_game_variable(GameVariable.POSITION_X), self.game.get_game_variable(GameVariable.POSITION_Y)]
@@ -175,6 +175,7 @@ class ViZDoomEnv(gymnasium.Env):
         if done:
             info['reward'] = self.total_reward
             info['length'] = self.total_length
+            info['killcount'] = self.game.get_game_variable(GameVariable.KILLCOUNT)
         return self.state, reward, done, done, info
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -394,10 +395,12 @@ if __name__ == "__main__":
             #        break
             for info in infos:
                 if 'reward' in info.keys():
-                    print(f"global_step={global_step}, episodic_return={info['reward']}")
+                    print(f"global_step={global_step}, episodic_return={info['reward']}, episodic_killcount={info['killcount']}")
                     writer.add_scalar("charts/episodic_return", info['reward'], global_step)
                 if 'length' in info.keys():
                     writer.add_scalar("charts/episodic_length", info['length'], global_step)
+                if 'killcount' in info.keys():
+                    writer.add_scalar("charts/episodic_killcount", info['killcount'], global_step)
 
 
 

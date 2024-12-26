@@ -27,7 +27,6 @@ import random
 import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 from typing import Callable, Tuple, Dict, Optional
-from stable_baselines3.common import vec_env
 import itertools
 
 if __name__ == "__main__":
@@ -37,7 +36,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--env-id', type=str, default="my_way_home",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=4.5e-4,
+    parser.add_argument('--learning-rate', type=float, default=9e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -63,7 +62,7 @@ if __name__ == "__main__":
     # Algorithm specific arguments
     parser.add_argument('--n-minibatch', type=int, default=4,
                         help='the number of mini batch')
-    parser.add_argument('--num-envs', type=int, default=8,
+    parser.add_argument('--num-envs', type=int, default=16,
                         help='the number of parallel game environment')
     parser.add_argument('--num-steps', type=int, default=128,
                         help='the number of steps per game environment')
@@ -130,7 +129,7 @@ class ViZDoomEnv(gymnasium.Env):
         pos_x = self.game.get_game_variable(GameVariable.POSITION_X)
         pos_y = self.game.get_game_variable(GameVariable.POSITION_Y)
         return np.array([pos_x, pos_y, pos_z])
-        
+
     def step(self, action: int):
         info = {}
         reward = self.game.make_action(self.actions[action], self.frame_skip)
@@ -165,7 +164,7 @@ class ViZDoomEnv(gymnasium.Env):
     def shape_reward(self, reward, curr_pos, prev_pos):
         dist = np.sqrt(np.sum((curr_pos - prev_pos) ** 2))
         #print(f"reward: {reward} dist: {dist * 0.00012}")
-        reward += dist * 0.00009     
+        reward += dist * 0.00009
         return reward
 
     def close(self) -> None:
@@ -181,12 +180,12 @@ class ViZDoomEnv(gymnasium.Env):
         if screen.ndim == 2:
             screen = np.expand_dims(screen, 0)
         else:
-            screen = screen.transpose(2, 0, 1)    
+            screen = screen.transpose(2, 0, 1)
         return screen
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
         return self.get_screen() if not done else self.empty_frame
-    
+
     def _get_actions(self):
         MUTUALLY_EXCLUSIVE_GROUPS = [
             [Button.MOVE_RIGHT, Button.MOVE_LEFT],
@@ -195,11 +194,11 @@ class ViZDoomEnv(gymnasium.Env):
         ]
         EXCLUSIVE_BUTTONS = [Button.ATTACK]
         def has_exclusive_button(actions: np.ndarray, buttons: np.array) -> np.array:
-            exclusion_mask = np.isin(buttons, EXCLUSIVE_BUTTONS)    
+            exclusion_mask = np.isin(buttons, EXCLUSIVE_BUTTONS)
             return (np.any(actions.astype(bool) & exclusion_mask, axis=-1)) & (np.sum(actions, axis=-1) > 1)
-        
+
         def has_excluded_pair(actions: np.ndarray, buttons: np.array) -> np.array:
-            mutual_exclusion_mask = np.array([np.isin(buttons, excluded_group) 
+            mutual_exclusion_mask = np.array([np.isin(buttons, excluded_group)
                                       for excluded_group in MUTUALLY_EXCLUSIVE_GROUPS])
             return np.any(np.sum(
                 (actions[:, np.newaxis, :] * mutual_exclusion_mask.astype(int)),
@@ -217,10 +216,10 @@ class ViZDoomEnv(gymnasium.Env):
             return possible_actions.tolist()
 
         possible_actions = get_available_actions(np.array([
-            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT, 
+            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT,
             Button.MOVE_RIGHT]))
         return possible_actions
-    
+
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
         super(VecPyTorch, self).__init__(venv)
@@ -264,7 +263,7 @@ def create_env() -> ViZDoomEnv:
     def thunk():
         game = vizdoom.DoomGame()
         game.load_config(f'scenarios/{args.env_id}.cfg')
-        game.set_window_visible(True)
+        game.set_window_visible(False)
         game.init()
         # Wrap the game with the Gym adapter.
         return ViZDoomEnv(game, channels=args.channels)
@@ -279,14 +278,6 @@ envs = VecPyTorch(
 assert isinstance(envs.action_space, gymnasium.spaces.discrete.Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
-class Scale(nn.Module):
-    def __init__(self, scale):
-        super().__init__()
-        self.scale = scale
-
-    def forward(self, x):
-        return x * self.scale
-
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
@@ -296,7 +287,6 @@ class Agent(nn.Module):
     def __init__(self, envs, frames=1):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            Scale(1/255),
             layer_init(nn.Conv2d(frames, 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
@@ -311,6 +301,7 @@ class Agent(nn.Module):
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def forward(self, x):
+        x = x / 255
         return self.network(x)
 
     def get_action(self, x, action=None):
@@ -373,11 +364,6 @@ for update in range(1, num_updates+1):
         next_obs, rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
-        #for info in infos:
-        #    if 'episode' in info.keys():
-        #        print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
-        #        writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
-        #        break
         for info in infos:
             if 'reward' in info.keys():
                 print(f"global_step={global_step}, episodic_return={info['reward']}")
@@ -389,7 +375,7 @@ for update in range(1, num_updates+1):
                 if len(goals) == args.num_envs:
                     writer.add_scalar("charts/goal_reached", sum(goals), global_step)
                     goals = []
-             
+
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
@@ -430,7 +416,7 @@ for update in range(1, num_updates+1):
     # Optimizaing the policy and value network
     inds = np.arange(args.batch_size,)
     for i_epoch_pi in range(args.update_epochs):
-        np.random.shuffle(inds)        
+        np.random.shuffle(inds)
         for start in range(0, args.batch_size, args.minibatch_size):
             end = start + args.minibatch_size
             minibatch_ind = inds[start:end]

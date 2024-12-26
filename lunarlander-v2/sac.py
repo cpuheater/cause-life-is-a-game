@@ -67,7 +67,7 @@ class Args:
     """the frequency of updates for the target networks"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
-    autotune: bool = True
+    autotune: bool = False
     """automatic tuning of the entropy coefficient"""
     target_entropy_scale: float = 0.89
     """coefficient for scaling the autotune entropy target"""
@@ -104,14 +104,14 @@ class SoftQNetwork(nn.Module):
         obs_shape = envs.single_observation_space.shape
 
         self.network = nn.Sequential(
-            layer_init(nn.Linear(np.array(obs_shape).prod(), 128)),
+            layer_init(nn.Linear(np.array(obs_shape).prod(), 200)),
             nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
+            layer_init(nn.Linear(200, 200)),
             nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
+            layer_init(nn.Linear(200, 200)),
             nn.ReLU())
 
-        self.fc_q = layer_init(nn.Linear(128, envs.single_action_space.n))
+        self.fc_q = layer_init(nn.Linear(200, envs.single_action_space.n))
 
     def forward(self, x):
         x = self.network(x)
@@ -124,13 +124,13 @@ class Actor(nn.Module):
         super().__init__()
         obs_shape = envs.single_observation_space.shape
         self.network = nn.Sequential(
-            layer_init(nn.Linear(np.array(obs_shape).prod(), 128)),
+            layer_init(nn.Linear(np.array(obs_shape).prod(), 200)),
             nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
+            layer_init(nn.Linear(200, 200)),
             nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
+            layer_init(nn.Linear(200, 200)),
             nn.ReLU())
-        self.fc_logits = layer_init(nn.Linear(128, envs.single_action_space.n))
+        self.fc_logits = layer_init(nn.Linear(200, envs.single_action_space.n))
 
     def forward(self, x):
         x = self.network(x)
