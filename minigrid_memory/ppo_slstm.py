@@ -15,9 +15,8 @@ import numpy as np
 import time
 import random
 import os
-import gymnasium
-from env import SimpleMemoryTask
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+import gymnasium as gym
+from slstm import sLSTM
 
 
 if __name__ == "__main__":
@@ -27,7 +26,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--env-id', type=str, default="MiniGrid-MemoryS7-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2e-3,
+    parser.add_argument('--learning-rate', type=float, default=2.5e-3,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -47,7 +46,7 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--rnn-hidden-size', type=int, default=256,
+    parser.add_argument('--rnn-hidden-size', type=int, default=64,
                         help='rnn hidden size')
     parser.add_argument('--seq-length', type=int, default=64,
                         help='seq length')
@@ -96,7 +95,7 @@ args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 start_time = time.time()
 # TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time.time().strftime("%m/%d/%Y, %H:%M:%S")}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
     '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
@@ -111,41 +110,44 @@ random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
+class ObservationWrapper(gym.ObservationWrapper):
 
-class VecPyTorch(VecEnvWrapper):
-    def __init__(self, venv, device):
-        super(VecPyTorch, self).__init__(venv)
-        self.device = device
+    def __init__(self, env):
+        super().__init__(env)
+        w, h, num_channels = env.observation_space["image"].shape
+        new_shape = (num_channels, w, h)
+        self.observation_space = gym.spaces.Box(0, 255, shape=new_shape, dtype=np.float32)
 
-    def reset(self):
-        obs  = self.venv.reset()
-        obs = torch.from_numpy(obs).float().to(self.device)
-        return obs
+    def observation(self, observation):
+        observation = observation['image'].astype('float32')
+        return np.transpose(observation,(2,0,1))
 
-    def step_async(self, actions):
-        actions = actions.cpu().numpy()
-        self.venv.step_async(actions)
 
-    def step_wait(self):
-        obs, reward, done, info = self.venv.step_wait()
-        #done = np.logical_or(terminations, truncations)
-        obs = torch.from_numpy(obs).float().to(self.device)
-        reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
-        return obs, reward, done, info
-
-def create_env(seed):
+def make_env(env_id, idx, capture_video, run_name):
     def thunk():
-        env = SimpleMemoryTask()
-        #env = PocMemoryEnv()
-        env.action_space.seed(seed)
-        return env
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        return ObservationWrapper(env)
     return thunk
 
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
-envs = VecPyTorch(SubprocVecEnv([create_env(args.seed + i) for i in range(args.num_envs)], "fork"), device = device)
-assert isinstance(envs.action_space, gymnasium.spaces.Discrete), "only discrete action space is supported"
+envs = gym.vector.AsyncVectorEnv(
+        [make_env(args.env_id, i, args.capture_video, experiment_name) for i in range(args.num_envs)],
+    )
+assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
+class Scale(nn.Module):
+    def __init__(self, scale):
+        super().__init__()
+        self.scale = scale
+
+    def forward(self, x):
+        return x * self.scale
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -164,22 +166,23 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     Returns:
         {tensor}: Returns the mean of the masked tensor.
     """
-    return (tensor.T * mask).sum()/ torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
+    return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
 
 class Agent(nn.Module):
     def __init__(self, envs, frames=3, rnn_input_size=256, rnn_hidden_size=256):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            nn.Linear(3, args.rnn_hidden_size),
-            nn.ReLU(True)
+            #Scale(1/255),
+            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
+            nn.LeakyReLU(),
+            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
+            nn.LeakyReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(980, rnn_input_size))
         )
 
-        self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size, batch_first=True)
-        for name, param in self.rnn.named_parameters():
-            if 'bias' in name:
-                nn.init.constant_(param, 0)
-            elif 'weight' in name:
-                nn.init.orthogonal_(param, np.sqrt(2))
+        self.rnn = sLSTM(input_size = rnn_input_size, head_size = rnn_input_size, num_heads = 1, num_layers=1, batch_first=True)
+
         self.actor = layer_init(nn.Linear(rnn_hidden_size, 3), std=0.01)
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
@@ -209,11 +212,11 @@ class Agent(nn.Module):
         x, _ = self.forward(x, rnn_state)
         return self.critic(x)
 
-def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states):
+def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states, rnn_norm_states, rnn_stab_states):
 
     # Supply training samples
     samples = {
-        'vis_obs': obs.permute(1, 0, 2).cpu().numpy(),
+        'vis_obs': obs.permute(1, 0, 2, 3, 4).cpu().numpy(),
         'actions': actions.permute(1, 0).cpu().numpy(),
         'values': values.permute(1, 0).cpu().numpy(),
         'log_probs': logprobs.permute(1, 0).cpu().numpy(),
@@ -221,7 +224,9 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         'returns': returns.permute(1, 0).cpu().numpy(),
         'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32),
         "hxs": rnn_hidden_states.permute(1, 0, 2).cpu().numpy(),
-        "cxs": cell_hidden_states.permute(1, 0, 2).cpu().numpy()
+        "cxs": cell_hidden_states.permute(1, 0, 2).cpu().numpy(),
+        "nxs": rnn_norm_states.permute(1, 0, 2).cpu().numpy(),
+        "sxs": rnn_stab_states.permute(1, 0, 2).cpu().numpy()
     }
 
     max_sequence_length = 1
@@ -258,7 +263,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
 
         # Stack episodes (target shape: (Episode, Step, Data ...) & apply data to the samples dict
         samples[key] = np.stack(sequences, axis=0)
-        if (key == "hxs" or key == "cxs"):
+        if (key == "hxs" or key == "cxs"  or key == "nxs" or key == "sxs"):
             # Select the very first recurrent cell state of a sequence and add it to the samples
             samples[key] = samples[key][:, 0]
 
@@ -269,14 +274,15 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
     # Flatten all samples
     samples_flat = {}
     for key, value in samples.items():
-        if (not key == "hxs" and not key == "cxs"):
+        if (not key == "hxs" and not key == "cxs" and not key == "nxs" and not key == "sxs"):
             value = value.reshape(value.shape[0] * value.shape[1], *value.shape[2:])
         samples_flat[key] = torch.tensor(value, dtype=torch.float32, device=device)
 
 
     #generator
     num_sequences_per_batch = num_sequences // args.n_minibatch
-    num_sequences_per_batch = [ num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
+    num_sequences_per_batch = [
+                                  num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
     remainder = num_sequences % args.n_minibatch
     for i in range(remainder):
         num_sequences_per_batch[i] += 1
@@ -291,7 +297,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         mini_batch_indices = indices[sequence_indices[start:end]].reshape(-1)
         mini_batch = {}
         for key, value in samples_flat.items():
-            if key != "hxs" and key != "cxs":
+            if key != "hxs" and key != "cxs"  and key != "nxs" and key != "sxs":
                 mini_batch[key] = value[mini_batch_indices].to(device)
             else:
                 # Collect recurrent cell states
@@ -321,30 +327,36 @@ def pad_sequence(sequence, target_length):
 
 rnn_hidden_size = args.rnn_hidden_size
 agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=args.rnn_hidden_size).to(device)
-optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)#, weight_decay=0.000002)
 if args.anneal_lr:
     # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
-obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
+obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
 dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
 rnn_cell_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+rnn_norm_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+rnn_stab_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
-next_obs = envs.reset()
+next_obs, _ = envs.reset()
 next_obs = torch.Tensor(next_obs).to(device)
 next_done = torch.zeros(args.num_envs).to(device)
 rnn_hidden_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
 rnn_cell_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+rnn_norm_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+rnn_stab_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+
 num_updates = args.total_timesteps // args.batch_size
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
@@ -360,34 +372,39 @@ for update in range(1, num_updates+1):
         dones[step] = next_done
         rnn_hidden_states[step] = rnn_hidden_state
         rnn_cell_states[step] = rnn_cell_state
+        rnn_norm_states[step] = rnn_norm_state
+        rnn_stab_states[step] = rnn_stab_state
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state))
+            value, (rnn_hidden_state, rnn_cell_state, rnn_norm_state, rnn_stab_state), action, logproba, _ = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state, rnn_norm_state, rnn_stab_state))
 
         values[step] = value.flatten()
         actions[step] = action
         logprobs[step] = logproba
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, reward, next_done, infos = envs.step(action)
+        next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+        next_done = np.logical_or(terminations, truncations)
         rewards[step], next_done, next_obs = torch.tensor(reward).to(device).view(-1), torch.Tensor(next_done).to(device), torch.Tensor(next_obs).to(device)
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
         rnn_hidden_state = rnn_hidden_state * mask
         rnn_cell_state = rnn_cell_state * mask
+        rnn_norm_state = rnn_norm_state * mask
+        rnn_stab_state = rnn_stab_state * mask
         indices = torch.nonzero(next_done).flatten().tolist()
         [episode_done_indices[index].append(step) for index in indices]
 
-        for info in infos:
-            if 'reward' in info.keys():
-                print(f"global_step={global_step}, episodic_return={info['reward']}")
-                writer.add_scalar("charts/episodic_return", info['reward'], global_step)
-            if 'length' in info.keys():
-                writer.add_scalar("charts/episodic_length", info['length'], global_step)
+        if "final_info" in infos:
+            for info in infos["final_info"]:
+                if info and "episode" in info:
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                    writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                    writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state, rnn_norm_state, rnn_stab_state)).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -416,16 +433,17 @@ for update in range(1, num_updates+1):
     # Optimizaing the policy and value network
     for i_epoch_pi in range(args.update_epochs):
         data_generator = recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns,
-                                             rnn_hidden_states, rnn_cell_states)
+                                             rnn_hidden_states, rnn_cell_states, rnn_norm_states, rnn_stab_states)
         for batch in data_generator:
-            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
+            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_rnn_norm_states, b_rnn_stab_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
                                                                                                                       batch['values'], batch['returns'], \
                                                                                                                       batch['log_probs'], batch['advantages'], \
-                                                                                                                      batch["hxs"], batch["cxs"], batch["loss_mask"]
+                                                                                                                      batch["hxs"], batch["cxs"], \
+                                                                                                                      batch["nxs"], batch["sxs"],batch["loss_mask"]
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
+            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0), b_rnn_norm_states.unsqueeze(0), b_rnn_stab_states.unsqueeze(0)),
                                                                      sequence_length=args.seq_length, action=b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 

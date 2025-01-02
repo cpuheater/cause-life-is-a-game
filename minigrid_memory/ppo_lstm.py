@@ -25,7 +25,7 @@ if __name__ == "__main__":
                         help='the name of this experiment')
     parser.add_argument('--env-id', type=str, default="MiniGrid-MemoryS7-v0",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=2e-3,
+    parser.add_argument('--learning-rate', type=float, default=1.0e-3,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
@@ -112,16 +112,16 @@ torch.backends.cudnn.deterministic = args.torch_deterministic
 class ObservationWrapper(gym.ObservationWrapper):
 
     def __init__(self, env):
-        super().__init__(env)        
+        super().__init__(env)
         w, h, num_channels = env.observation_space["image"].shape
-        new_shape = (num_channels, w, h)        
+        new_shape = (num_channels, w, h)
         self.observation_space = gym.spaces.Box(0, 255, shape=new_shape, dtype=np.float32)
 
-    def observation(self, observation):        
-        observation = observation['image'].astype('float32')        
+    def observation(self, observation):
+        observation = observation['image'].astype('float32')
         return np.transpose(observation,(2,0,1))
-    
-    
+
+
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
@@ -129,7 +129,7 @@ def make_env(env_id, idx, capture_video, run_name):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id)
-        env = gym.wrappers.RecordEpisodeStatistics(env)        
+        env = gym.wrappers.RecordEpisodeStatistics(env)
         return ObservationWrapper(env)
     return thunk
 
@@ -197,7 +197,7 @@ class Agent(nn.Module):
         else:
             x_shape = tuple(x.size())
             x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
-            x, rnn_state = self.rnn(x, rnn_state)
+            x, rnn_state = self.rnn(x)
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
         return x, rnn_state
@@ -303,6 +303,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
             else:
                 # Collect recurrent cell states
                 mini_batch[key] = value[sequence_indices[start:end]].to(device)
+            mini_batch['max_sequence_length'] = max_sequence_length
         start = end
         yield mini_batch
 
@@ -385,7 +386,7 @@ for update in range(1, num_updates+1):
         rnn_cell_state = rnn_cell_state * mask
         indices = torch.nonzero(next_done).flatten().tolist()
         [episode_done_indices[index].append(step) for index in indices]
-        
+
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
@@ -430,11 +431,12 @@ for update in range(1, num_updates+1):
                                                                                                                       batch['values'], batch['returns'], \
                                                                                                                       batch['log_probs'], batch['advantages'], \
                                                                                                                       batch["hxs"], batch["cxs"], batch["loss_mask"]
+            max_sequence_length = batch['max_sequence_length']
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
-                                                                     sequence_length=args.seq_length, action=b_actions.long())
+            newvalues, rnn_states, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
+                                                                     sequence_length=max_sequence_length, action=b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 
             # Stats
@@ -479,7 +481,7 @@ for update in range(1, num_updates+1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
-    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)         
+    writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
 
 envs.close()
 writer.close()

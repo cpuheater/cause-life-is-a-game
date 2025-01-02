@@ -18,6 +18,7 @@ import os
 import gymnasium
 from env import SimpleMemoryTask
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+from slstm2 import sLSTM
 
 
 if __name__ == "__main__":
@@ -47,7 +48,7 @@ if __name__ == "__main__":
                         help="the entity (team) of wandb's project")
     parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
-    parser.add_argument('--rnn-hidden-size', type=int, default=256,
+    parser.add_argument('--rnn-hidden-size', type=int, default=64,
                         help='rnn hidden size')
     parser.add_argument('--seq-length', type=int, default=64,
                         help='seq length')
@@ -164,7 +165,7 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     Returns:
         {tensor}: Returns the mean of the masked tensor.
     """
-    return (tensor.T * mask).sum()/ torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
+    return (tensor.T * mask).sum() #/ torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
 
 class Agent(nn.Module):
     def __init__(self, envs, frames=3, rnn_input_size=256, rnn_hidden_size=256):
@@ -174,12 +175,8 @@ class Agent(nn.Module):
             nn.ReLU(True)
         )
 
-        self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size, batch_first=True)
-        for name, param in self.rnn.named_parameters():
-            if 'bias' in name:
-                nn.init.constant_(param, 0)
-            elif 'weight' in name:
-                nn.init.orthogonal_(param, np.sqrt(2))
+        self.rnn = sLSTM(input_size = rnn_input_size, head_size = rnn_input_size, num_heads = 1, num_layers=1, batch_first=True)
+
         self.actor = layer_init(nn.Linear(rnn_hidden_size, 3), std=0.01)
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
@@ -191,7 +188,7 @@ class Agent(nn.Module):
         else:
             x_shape = tuple(x.size())
             x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
-            x, rnn_state = self.rnn(x)
+            x, rnn_state = self.rnn(x, rnn_state)
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
         return x, rnn_state
@@ -209,7 +206,7 @@ class Agent(nn.Module):
         x, _ = self.forward(x, rnn_state)
         return self.critic(x)
 
-def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states):
+def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, rnn_cell_states, rnn_norm_states, rnn_stab_states):
 
     # Supply training samples
     samples = {
@@ -221,7 +218,9 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         'returns': returns.permute(1, 0).cpu().numpy(),
         'loss_mask': np.ones((args.num_envs, args.num_steps), dtype=np.float32),
         "hxs": rnn_hidden_states.permute(1, 0, 2).cpu().numpy(),
-        "cxs": cell_hidden_states.permute(1, 0, 2).cpu().numpy()
+        "cxs": rnn_cell_states.permute(1, 0, 2).cpu().numpy(),
+        "nxs": rnn_norm_states.permute(1, 0, 2).cpu().numpy(),
+        "sxs": rnn_stab_states.permute(1, 0, 2).cpu().numpy()
     }
 
     max_sequence_length = 1
@@ -258,7 +257,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
 
         # Stack episodes (target shape: (Episode, Step, Data ...) & apply data to the samples dict
         samples[key] = np.stack(sequences, axis=0)
-        if (key == "hxs" or key == "cxs"):
+        if (key == "hxs" or key == "cxs" or key == "nxs" or key == "sxs"):
             # Select the very first recurrent cell state of a sequence and add it to the samples
             samples[key] = samples[key][:, 0]
 
@@ -269,14 +268,15 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
     # Flatten all samples
     samples_flat = {}
     for key, value in samples.items():
-        if (not key == "hxs" and not key == "cxs"):
+        if (not key == "hxs" and not key == "cxs" and not key == "nxs" and not key == "sxs"):
             value = value.reshape(value.shape[0] * value.shape[1], *value.shape[2:])
         samples_flat[key] = torch.tensor(value, dtype=torch.float32, device=device)
 
 
     #generator
     num_sequences_per_batch = num_sequences // args.n_minibatch
-    num_sequences_per_batch = [ num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
+    num_sequences_per_batch = [
+                                  num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
     remainder = num_sequences % args.n_minibatch
     for i in range(remainder):
         num_sequences_per_batch[i] += 1
@@ -291,7 +291,7 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
         mini_batch_indices = indices[sequence_indices[start:end]].reshape(-1)
         mini_batch = {}
         for key, value in samples_flat.items():
-            if key != "hxs" and key != "cxs":
+            if key != "hxs" and key != "cxs" and key != "nxs" and key != "sxs":
                 mini_batch[key] = value[mini_batch_indices].to(device)
             else:
                 # Collect recurrent cell states
@@ -335,6 +335,8 @@ dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
 rnn_cell_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+rnn_norm_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
+rnn_stab_states = torch.zeros((args.num_steps, args.num_envs, rnn_hidden_size)).to(device)
 
 # TRY NOT TO MODIFY: start the game
 global_step = 0
@@ -345,6 +347,9 @@ next_obs = torch.Tensor(next_obs).to(device)
 next_done = torch.zeros(args.num_envs).to(device)
 rnn_hidden_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
 rnn_cell_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+rnn_norm_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+rnn_stab_state = torch.zeros((1, args.num_envs, rnn_hidden_size)).to(device)
+
 num_updates = args.total_timesteps // args.batch_size
 for update in range(1, num_updates+1):
     # Annealing the rate if instructed to do so.
@@ -360,10 +365,12 @@ for update in range(1, num_updates+1):
         dones[step] = next_done
         rnn_hidden_states[step] = rnn_hidden_state
         rnn_cell_states[step] = rnn_cell_state
+        rnn_norm_states[step] = rnn_norm_state
+        rnn_stab_states[step] = rnn_stab_state
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state))
+            value, (rnn_hidden_state, rnn_cell_state, rnn_norm_state, rnn_stab_state), action, logproba, _ = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state, rnn_norm_state, rnn_stab_state))
 
         values[step] = value.flatten()
         actions[step] = action
@@ -375,6 +382,8 @@ for update in range(1, num_updates+1):
         mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
         rnn_hidden_state = rnn_hidden_state * mask
         rnn_cell_state = rnn_cell_state * mask
+        rnn_norm_state = rnn_norm_state * mask
+        rnn_stab_state = rnn_stab_state * mask
         indices = torch.nonzero(next_done).flatten().tolist()
         [episode_done_indices[index].append(step) for index in indices]
 
@@ -387,7 +396,7 @@ for update in range(1, num_updates+1):
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state, rnn_norm_state, rnn_stab_state)).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -416,16 +425,18 @@ for update in range(1, num_updates+1):
     # Optimizaing the policy and value network
     for i_epoch_pi in range(args.update_epochs):
         data_generator = recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns,
-                                             rnn_hidden_states, rnn_cell_states)
+                                             rnn_hidden_states, rnn_cell_states, rnn_norm_states, rnn_stab_states)
         for batch in data_generator:
-            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
+            b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_rnn_norm_states, b_rnn_stab_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
                                                                                                                       batch['values'], batch['returns'], \
                                                                                                                       batch['log_probs'], batch['advantages'], \
-                                                                                                                      batch["hxs"], batch["cxs"], batch["loss_mask"]
+                                                                                                                      batch["hxs"], batch["cxs"], \
+                                                                                                                      batch["nxs"], batch["sxs"],  batch["loss_mask"]
             if args.norm_adv:
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
+            newvalues, _, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0),
+                                                                             b_rnn_norm_states.unsqueeze(0), b_rnn_stab_states.unsqueeze(0)),
                                                                      sequence_length=args.seq_length, action=b_actions.long())
             ratio = (newlogproba - b_logprobs).exp()
 

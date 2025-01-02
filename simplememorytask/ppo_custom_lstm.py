@@ -18,6 +18,7 @@ import os
 import gymnasium
 from env import SimpleMemoryTask
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
+from custom_lstm import CustomLSTM
 
 
 if __name__ == "__main__":
@@ -164,7 +165,7 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     Returns:
         {tensor}: Returns the mean of the masked tensor.
     """
-    return (tensor.T * mask).sum()/ torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
+    return (tensor.T * mask).sum() / torch.clamp((torch.ones_like(tensor.T) * mask).float().sum(), min=1.0)
 
 class Agent(nn.Module):
     def __init__(self, envs, frames=3, rnn_input_size=256, rnn_hidden_size=256):
@@ -174,7 +175,7 @@ class Agent(nn.Module):
             nn.ReLU(True)
         )
 
-        self.rnn = nn.LSTM(rnn_input_size, rnn_hidden_size, batch_first=True)
+        self.rnn = CustomLSTM(rnn_input_size, rnn_hidden_size)
         for name, param in self.rnn.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0)
@@ -191,7 +192,7 @@ class Agent(nn.Module):
         else:
             x_shape = tuple(x.size())
             x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
-            x, rnn_state = self.rnn(x)
+            x, rnn_state = self.rnn(x, rnn_state)
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
         return x, rnn_state
@@ -276,7 +277,8 @@ def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, ad
 
     #generator
     num_sequences_per_batch = num_sequences // args.n_minibatch
-    num_sequences_per_batch = [ num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
+    num_sequences_per_batch = [
+                                  num_sequences_per_batch] * args.n_minibatch  # Arrange a list that determines the episode count for each mini batch
     remainder = num_sequences % args.n_minibatch
     for i in range(remainder):
         num_sequences_per_batch[i] += 1
