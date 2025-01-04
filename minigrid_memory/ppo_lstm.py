@@ -468,9 +468,6 @@ for update in range(1, num_updates+1):
             nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
 
-        if args.kle_stop:
-            if approx_kl > args.target_kl:
-                break
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/grad_norm", grad_norm, global_step)

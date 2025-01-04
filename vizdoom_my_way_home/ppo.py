@@ -104,6 +104,17 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
+# TRY NOT TO MODIFY: setup the environment
+experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time.strftime('%Y_%m_%d__%H_%M_%S')}"
+writer = SummaryWriter(f"runs/{experiment_name}")
+writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
+        '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+
+if args.prod_mode:
+    import wandb
+    wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
+    writer = SummaryWriter(f"/tmp/{experiment_name}")
+
 class ViZDoomEnv(gymnasium.Env):
 
     def __init__(self,
@@ -240,17 +251,6 @@ class VecPyTorch(VecEnvWrapper):
         obs = torch.from_numpy(obs).float().to(self.device)
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
         return obs, reward, done, info
-
-
-# TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-writer = SummaryWriter(f"runs/{experiment_name}")
-writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
-        '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
-if args.prod_mode:
-    import wandb
-    wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
-    writer = SummaryWriter(f"/tmp/{experiment_name}")
 
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')

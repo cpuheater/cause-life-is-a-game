@@ -40,7 +40,7 @@ if __name__ == "__main__":
                         help='run the script in production mode and use wandb to log outputs')
     parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
-    parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
+    parser.add_argument('--wandb-project-name', type=str, default="",
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
@@ -95,7 +95,7 @@ args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 start_time = time.time()
 # TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time.time().strftime("%m/%d/%Y, %H:%M:%S")}"
+experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time.strftime("%Y_%m_%d__%H_%M_%S")}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
     '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
