@@ -34,7 +34,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env-id', type=str, default="my_way_home",
+    parser.add_argument('--env-id', type=str, default="custom_scenario000",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -54,7 +54,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=0.1,
+    parser.add_argument('--scale-reward', type=float, default=0.01,
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
@@ -161,7 +161,7 @@ class ViZDoomEnv(gymnasium.Env):
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
         curr_pos = self._get_game_variables()
-        reward = self.shape_reward(reward, curr_pos, self.prev_pos)
+        reward = reward + self.get_health_reward()#self.shape_reward(reward, curr_pos, self.prev_pos)
         reward = reward * self.scale_reward
         self.total_reward += reward
         self.total_length += 1
@@ -172,6 +172,12 @@ class ViZDoomEnv(gymnasium.Env):
         self.prev_pos = curr_pos
         return self.state, reward, done, done, info
 
+    def get_health_reward(self):
+        curr_health = self.game.get_game_variable(GameVariable.HEALTH)
+        health = curr_health - self.prev_health
+        self.prev_health = curr_health
+        return health * 0.2 if health < 0 else health * 1    
+    
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         if seed is not None:
@@ -181,6 +187,7 @@ class ViZDoomEnv(gymnasium.Env):
         self.total_reward = 0
         self.total_length = 0
         self.prev_pos = self._get_game_variables()
+        self.prev_health = self.game.get_game_variable(GameVariable.HEALTH)
         return self.state, {}
 
     def shape_reward(self, reward, curr_pos, prev_pos):
@@ -210,7 +217,6 @@ class ViZDoomEnv(gymnasium.Env):
 
     def _get_actions(self):
         MUTUALLY_EXCLUSIVE_GROUPS = [
-            [Button.MOVE_RIGHT, Button.MOVE_LEFT],
             [Button.TURN_RIGHT, Button.TURN_LEFT],
             #[Button.MOVE_FORWARD, Button.MOVE_BACKWARD],
         ]
@@ -238,8 +244,7 @@ class ViZDoomEnv(gymnasium.Env):
             return possible_actions.tolist()
 
         possible_actions = get_available_actions(np.array([
-            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT,
-            Button.MOVE_RIGHT]))
+            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD]))
         return possible_actions
 
 class VecPyTorch(VecEnvWrapper):

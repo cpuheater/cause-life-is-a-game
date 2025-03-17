@@ -34,7 +34,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env-id', type=str, default="my_way_home",
+    parser.add_argument('--env-id', type=str, default="findreturn",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
@@ -54,7 +54,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=0.1,
+    parser.add_argument('--scale-reward', type=float, default=1,
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
@@ -155,13 +155,16 @@ class ViZDoomEnv(gymnasium.Env):
     def step(self, action: int):
         info = {}
         reward = self.game.make_action(self.actions[action], self.frame_skip)
-        goal_reached = True if reward >= 0.95 else False
-        if goal_reached:
+        goal_reached = True if reward >= 0.4 else False
+        if goal_reached and self.sub_goal:
             reward += 10
+        if goal_reached:
+            self.sub_goal = True
+            reward += 1            
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
         curr_pos = self._get_game_variables()
-        reward = self.shape_reward(reward, curr_pos, self.prev_pos)
+        #reward = self.shape_reward(reward, curr_pos, self.prev_pos)
         reward = reward * self.scale_reward
         self.total_reward += reward
         self.total_length += 1
@@ -181,6 +184,7 @@ class ViZDoomEnv(gymnasium.Env):
         self.total_reward = 0
         self.total_length = 0
         self.prev_pos = self._get_game_variables()
+        self.sub_goal = False
         return self.state, {}
 
     def shape_reward(self, reward, curr_pos, prev_pos):
