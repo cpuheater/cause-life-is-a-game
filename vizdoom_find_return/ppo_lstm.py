@@ -157,7 +157,7 @@ class ViZDoomEnv(gymnasium.Env):
         reward = self.game.make_action(self.actions[action], self.frame_skip)
         goal_reached = True if reward >= 0.4 else False
         if goal_reached and self.sub_goal:
-            reward += 10
+            reward += 1
         if goal_reached:
             self.sub_goal = True
             reward += 1            
@@ -620,5 +620,6 @@ for update in range(1, num_updates+1):
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
     writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
 
+torch.save(agent, f"agent_{args.total_timesteps}.pt")
 envs.close()
 writer.close()
