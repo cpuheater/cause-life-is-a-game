@@ -54,7 +54,7 @@ if __name__ == "__main__":
                         help="the wandb's project name")
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
-    parser.add_argument('--scale-reward', type=float, default=0.01,
+    parser.add_argument('--scale-reward', type=float, default=1,
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
@@ -154,30 +154,21 @@ class ViZDoomEnv(gymnasium.Env):
 
     def step(self, action: int):
         info = {}
-        reward = self.game.make_action(self.actions[action], self.frame_skip)
-        goal_reached = True if reward >= 0.95 else False
-        if goal_reached:
-            reward += 10
+        reward = self.game.make_action(self.actions[action], self.frame_skip)            
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
         curr_pos = self._get_game_variables()
-        reward = reward + self.get_health_reward()#self.shape_reward(reward, curr_pos, self.prev_pos)
+        #print(f"reward: {reward} health reward: {self.get_health_reward()}")
+        reward += self.get_health_reward()
         reward = reward * self.scale_reward
         self.total_reward += reward
         self.total_length += 1
         if done:
             info['reward'] = self.total_reward
             info['length'] = self.total_length
-            info['goal_reached'] = goal_reached
         self.prev_pos = curr_pos
         return self.state, reward, done, done, info
 
-    def get_health_reward(self):
-        curr_health = self.game.get_game_variable(GameVariable.HEALTH)
-        health = curr_health - self.prev_health
-        self.prev_health = curr_health
-        return health * 0.2 if health < 0 else health * 1    
-    
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         if seed is not None:
@@ -187,14 +178,15 @@ class ViZDoomEnv(gymnasium.Env):
         self.total_reward = 0
         self.total_length = 0
         self.prev_pos = self._get_game_variables()
+        self.prev_pos = None
         self.prev_health = self.game.get_game_variable(GameVariable.HEALTH)
         return self.state, {}
 
-    def shape_reward(self, reward, curr_pos, prev_pos):
-        dist = np.sqrt(np.sum((curr_pos - prev_pos) ** 2))
-        #print(f"reward: {reward} dist: {dist * 0.00012}")
-        reward += dist * 0.00009
-        return reward
+    def get_health_reward(self):
+        curr_health = self.game.get_game_variable(GameVariable.HEALTH)
+        health = curr_health - self.prev_health
+        self.prev_health = curr_health
+        return health * 0.05
 
     def close(self) -> None:
         self.game.close()
@@ -217,6 +209,7 @@ class ViZDoomEnv(gymnasium.Env):
 
     def _get_actions(self):
         MUTUALLY_EXCLUSIVE_GROUPS = [
+            [Button.MOVE_RIGHT, Button.MOVE_LEFT],
             [Button.TURN_RIGHT, Button.TURN_LEFT],
             #[Button.MOVE_FORWARD, Button.MOVE_BACKWARD],
         ]
@@ -244,7 +237,8 @@ class ViZDoomEnv(gymnasium.Env):
             return possible_actions.tolist()
 
         possible_actions = get_available_actions(np.array([
-            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD]))
+            Button.TURN_LEFT, Button.TURN_RIGHT, Button.MOVE_FORWARD, Button.MOVE_LEFT,
+            Button.MOVE_RIGHT]))
         return possible_actions
 
 class VecPyTorch(VecEnvWrapper):
@@ -278,7 +272,7 @@ def create_env() -> ViZDoomEnv:
         return ViZDoomEnv(game, channels=args.channels)
     return thunk
 
-#envs = VecPyTorch(DummyVecEnv([create_env(**kwargs) for i in range(args.num_envs)]), device)
+#envs = VecPyTorch(DummyVecEnv([create_env() for i in range(args.num_envs)]), device)
 
 envs = VecPyTorch(
          SubprocVecEnv([create_env() for i in range(args.num_envs)], "fork"),
@@ -521,11 +515,6 @@ for update in range(1, num_updates+1):
                 writer.add_scalar("charts/episodic_return", info['reward'], global_step)
             if 'length' in info.keys():
                 writer.add_scalar("charts/episodic_length", info['length'], global_step)
-            if 'goal_reached' in info.keys():
-                goals.append(info['goal_reached'])
-                if len(goals) == args.num_envs:
-                    writer.add_scalar("charts/goal_reached", sum(goals), global_step)
-                    goals = []
 
 
     # bootstrap reward if not done. reached the batch limit
@@ -621,5 +610,6 @@ for update in range(1, num_updates+1):
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
     writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
 
+torch.save(agent, f"agent_{args.total_timesteps}.pt")
 envs.close()
 writer.close()
