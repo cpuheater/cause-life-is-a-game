@@ -102,7 +102,7 @@ class ViZDoomEnv(gymnasium.Env):
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
         curr_pos = self._get_game_variables()
-        #reward = self.shape_reward(reward, curr_pos, self.prev_pos)
+        reward = reward + self.get_health_reward()
         reward = reward * self.scale_reward
         self.total_reward += reward
         self.total_length += 1
@@ -123,13 +123,14 @@ class ViZDoomEnv(gymnasium.Env):
         self.total_length = 0
         self.prev_pos = self._get_game_variables()
         self.sub_goal = False
+        self.prev_health = self.game.get_game_variable(GameVariable.HEALTH) 
         return self.state, {}
 
-    def shape_reward(self, reward, curr_pos, prev_pos):
-        dist = np.sqrt(np.sum((curr_pos - prev_pos) ** 2))
-        #print(f"reward: {reward} dist: {dist * 0.00012}")
-        reward += dist * 0.00009
-        return reward
+    def get_health_reward(self):
+        curr_health = self.game.get_game_variable(GameVariable.HEALTH)
+        health = curr_health - self.prev_health
+        self.prev_health = curr_health
+        return health * 0.1 if health < 0 else health * 0.2
 
     def close(self) -> None:
         self.game.close()
@@ -363,7 +364,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env-id', type=str, default="findreturn",
+    parser.add_argument('--env-id', type=str, default="k_item",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
