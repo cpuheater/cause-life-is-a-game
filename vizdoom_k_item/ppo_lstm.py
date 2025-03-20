@@ -388,9 +388,9 @@ if __name__ == "__main__":
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
-    parser.add_argument('--rnn-hidden-size', type=int, default=256,
+    parser.add_argument('--rnn-hidden-size', type=int, default=512,
                         help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=256,
+    parser.add_argument('--seq-length', type=int, default=128,
                         help='seq length')
 
     # Algorithm specific arguments

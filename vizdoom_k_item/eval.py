@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 
 @dataclass
 class Args:
-    env_id: str = "findreturn"
+    env_id: str = "k_item"
     """the id of the environment"""
     num_actions: int = 17
     """num actions"""
@@ -54,6 +54,7 @@ if __name__ == '__main__':
         game.new_episode()
         obs = game.get_state().screen_buffer
         rnn_state = (torch.zeros(1, 1, 256), torch.zeros(1, 1, 256))
+        num_step = 0
         while True:
             obs = cv2.resize(obs, (112, 64), interpolation = cv2.INTER_AREA)
             obs = obs.transpose(2,0,1)
@@ -62,9 +63,10 @@ if __name__ == '__main__':
             probs = torch.sigmoid(out.squeeze(0))
             max_idx = torch.argmax(probs, 0, keepdim=True)
             game.make_action(actions[max_idx], args.skip_frame)
+            num_step += 1    
             if game.is_episode_finished():
                 total_rewards.append(game.get_total_reward())
-                print(f"Total reward: {game.get_total_reward()}, running mean: {np.mean(total_rewards)}")
+                print(f"Total reward: {game.get_total_reward()}, running mean: {np.mean(total_rewards)}, steps: f{num_step}")
                 break
             else:
                 obs = game.get_state().screen_buffer
