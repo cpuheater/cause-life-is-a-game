@@ -30,6 +30,7 @@ class Args:
     """"""
     render: bool = True
     """"""
+    rnn_hidden_size = 512
 
 if __name__ == '__main__':
     args = tyro.cli(Args)
@@ -46,14 +47,14 @@ if __name__ == '__main__':
 
     game.init()
     actions = get_actions()
-    model = Agent(args.num_actions, 256, 3)
+    model = Agent(args.num_actions, args.rnn_hidden_size, 3)
     model.load_state_dict(torch.load(args.model_file, weights_only = False))
     model.eval()
     total_rewards = []
     for episode in tqdm(range(args.num_episodes)):
         game.new_episode()
         obs = game.get_state().screen_buffer
-        rnn_state = (torch.zeros(1, 1, 256), torch.zeros(1, 1, 256))
+        rnn_state = (torch.zeros(1, 1, args.rnn_hidden_size), torch.zeros(1, 1, args.rnn_hidden_size))
         num_step = 0
         while True:
             obs = cv2.resize(obs, (112, 64), interpolation = cv2.INTER_AREA)
