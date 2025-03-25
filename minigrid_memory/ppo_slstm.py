@@ -16,7 +16,7 @@ import time
 import random
 import os
 import gymnasium as gym
-from slstm import sLSTM
+from xlstm import sLSTM
 
 
 if __name__ == "__main__":
@@ -94,11 +94,9 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 start_time = time.time()
-# TRY NOT TO MODIFY: setup the environment
-experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time.strftime("%Y_%m_%d__%H_%M_%S")}"
+experiment_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time.strftime('%Y_%m_%d__%H_%M_%S')}"
 writer = SummaryWriter(f"runs/{experiment_name}")
-writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
-    '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % ('\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 if args.prod_mode:
     import wandb
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
@@ -194,7 +192,7 @@ class Agent(nn.Module):
         else:
             x_shape = tuple(x.size())
             x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
-            x, rnn_state = self.rnn(x)
+            x, rnn_state = self.rnn(x, rnn_state)
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
         return x, rnn_state

@@ -364,13 +364,13 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--env-id', type=str, default="k_item",
+    parser.add_argument('--env-id', type=str, default="two_color_large",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=4.5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total-timesteps', type=int, default=20000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -390,7 +390,7 @@ if __name__ == "__main__":
                         help='frame skip')
     parser.add_argument('--rnn-hidden-size', type=int, default=512,
                         help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=128,
+    parser.add_argument('--seq-length', type=int, default=256,
                         help='seq length')
 
     # Algorithm specific arguments

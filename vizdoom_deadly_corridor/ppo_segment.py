@@ -193,10 +193,10 @@ class ViZDoomEnv(gymnasium.Env):
         return tmp
 
     def get_screen(self):
-        #screen = self.game.get_state().screen_buffer
+        screen = self.game.get_state().screen_buffer
         screen = self.set_colors(self.game.get_state().labels_buffer)
-        #cv2.imshow("ViZDoom Labels Buffer", screen)
-        #cv2.waitKey(3000)
+        cv2.imshow("ViZDoom Labels Buffer", screen)
+        cv2.waitKey(3000)
         channels, h, w = self.observation_space.shape
         screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
         if screen.ndim == 2:

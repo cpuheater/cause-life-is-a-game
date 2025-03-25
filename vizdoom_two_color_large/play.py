@@ -15,7 +15,7 @@ from time import sleep
 import vizdoom as vzd
 
 
-DEFAULT_CONFIG = os.path.join(os.getcwd(), "scenarios/k_item.cfg")
+DEFAULT_CONFIG = os.path.join(os.getcwd(), "scenarios/two_color_large.cfg")
 
 if __name__ == "__main__":
     parser = ArgumentParser("ViZDoom example showing how to use SPECTATOR mode.")
