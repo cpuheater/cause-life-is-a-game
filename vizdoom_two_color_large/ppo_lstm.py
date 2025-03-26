@@ -370,7 +370,7 @@ if __name__ == "__main__":
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=20000000,
+    parser.add_argument('--total-timesteps', type=int, default=30000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -388,9 +388,9 @@ if __name__ == "__main__":
                         help='scale reward')
     parser.add_argument('--frame-skip', type=int, default=4,
                         help='frame skip')
-    parser.add_argument('--rnn-hidden-size', type=int, default=512,
+    parser.add_argument('--rnn-hidden-size', type=int, default=256,
                         help='rnn hidden size')
-    parser.add_argument('--seq-length', type=int, default=256,
+    parser.add_argument('--seq-length', type=int, default=128,
                         help='seq length')
 
     # Algorithm specific arguments
