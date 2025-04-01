@@ -10,7 +10,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
+from minigrid.wrappers import FlatObsWrapper
 import argparse
 from distutils.util import strtobool
 import numpy as np
@@ -20,19 +20,6 @@ import os
 import gymnasium as gym
 
 
-class ObservationWrapper(gym.ObservationWrapper):
-
-    def __init__(self, env):
-        super().__init__(env)        
-        w, h, num_channels = env.observation_space["image"].shape
-        new_shape = (num_channels, w, h)        
-        self.observation_space = gym.spaces.Box(0, 255, shape=new_shape, dtype=np.float32)
-
-    def observation(self, observation):        
-        observation = observation['image'].astype('float32')        
-        return np.transpose(observation,(2,0,1))
-    
-    
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
@@ -40,9 +27,10 @@ def make_env(env_id, idx, capture_video, run_name):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id)
+            env = FlatObsWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)    
         env = gym.wrappers.TransformReward(env, lambda r: r * args.scale_reward)    
-        return ObservationWrapper(env)
+        return env
     return thunk
 
 # ALGO LOGIC: initialize agent here:
@@ -60,16 +48,12 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs, frames=3):
+    def __init__(self, envs):
         super(Agent, self).__init__()
         self.network = nn.Sequential(
-            Scale(1/5),
-            layer_init(nn.Conv2d(frames, 16, kernel_size=(1, 1), padding=0)),
+            layer_init(nn.Linear(envs.single_observation_space.shape[0], 512)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(16, 20, kernel_size=(1, 1), padding=0)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(980, 124)),
+            layer_init(nn.Linear(512, 124)),
             nn.ReLU()
         )
         self.actor = layer_init(nn.Linear(124, envs.single_action_space.n), std=0.01)

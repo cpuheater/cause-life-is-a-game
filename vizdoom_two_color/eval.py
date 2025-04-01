@@ -31,6 +31,8 @@ class Args:
     render: bool = True
     """"""
     rnn_hidden_size = 512
+    """"""
+    capture_video = False
 
 if __name__ == '__main__':
     args = tyro.cli(Args)
@@ -43,7 +45,7 @@ if __name__ == '__main__':
         game.set_window_visible(True)
         game.set_mode(vzd.Mode.ASYNC_PLAYER)
     else:
-        game.set_mode(vzd.Mode.PLAYER)
+        game.set_mode(vzd.Mode.PLAYER)    
 
     game.init()
     actions = get_actions()
@@ -71,4 +73,6 @@ if __name__ == '__main__':
                 break
             else:
                 obs = game.get_state().screen_buffer
+        if args.capture_video:
+            env = gymnasium.wrappers.RecordVideo(env, f"videos/{run_name}")        
     print(f"Mean reward: {np.mean(total_rewards)} using {args.model_file}")

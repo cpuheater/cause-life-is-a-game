@@ -15,7 +15,7 @@ from time import sleep
 import vizdoom as vzd
 
 
-DEFAULT_CONFIG = os.path.join(os.getcwd(), "scenarios/k_item.cfg")
+DEFAULT_CONFIG = os.path.join(os.getcwd(), "scenarios/two_color.cfg")
 
 if __name__ == "__main__":
     parser = ArgumentParser("ViZDoom example showing how to use SPECTATOR mode.")
@@ -39,8 +39,8 @@ if __name__ == "__main__":
     # Enables freelook in engine
     game.add_game_args("+freelook 1")
 
-    game.set_screen_resolution(vzd.ScreenResolution.RES_640X480)
-
+    game.set_screen_resolution(vzd.ScreenResolution.RES_800X600)
+    game.set_render_hud(True)
     # Enables spectator mode, so you can play. Sounds strange but it is the agent who is supposed to watch not you.
     game.set_window_visible(True)
     game.set_mode(vzd.Mode.SPECTATOR)
