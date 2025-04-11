@@ -101,7 +101,7 @@ class Agent(nn.Module):
         else:
             x_shape = tuple(x.size())
             x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
-            x, rnn_state = self.rnn(x)
+            x, rnn_state = self.rnn(x, rnn_state)
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
         return x, rnn_state
