@@ -4,33 +4,93 @@ import random
 import time
 from dataclasses import dataclass
 
-import gymnasium as gym
+import gymnasium
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
-from gymnasium.spaces import Discrete, Box
-from gymnasium import spaces
-import cv2
+from stable_baselines3.common.atari_wrappers import (
+    ClipRewardEnv,
+    EpisodicLifeEnv,
+    FireResetEnv,
+    MaxAndSkipEnv,
+    NoopResetEnv,
+)
 import vizdoom
-import itertools
-from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-import skimage.transform
-import gymnasium
-from typing import Optional
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
+import cv2
+from vizdoom import DoomGame
+import itertools
+from gymnasium import spaces
+from gymnasium.spaces import Discrete, Box
+from typing import Optional
+
+@dataclass
+class Args:
+    exp_name: str = os.path.basename(__file__)[: -len(".py")]
+    """the name of this experiment"""
+    seed: int = 1
+    """seed of the experiment"""
+    torch_deterministic: bool = True
+    """if toggled, `torch.backends.cudnn.deterministic=False`"""
+    cuda: bool = True
+    """if toggled, cuda will be enabled by default"""
+    track: bool = False
+    """if toggled, this experiment will be tracked with Weights and Biases"""
+    wandb_project_name: str = ""
+    """the wandb's project name"""
+    wandb_entity: str = None
+    """the entity (team) of wandb's project"""
+    capture_video: bool = False
+    """whether to capture videos of the agent performances (check out `videos` folder)"""
+
+    # Algorithm specific arguments
+    env_id: str = "basic"
+    """the id of the environment"""
+    total_timesteps: int = 5000000
+    """total timesteps of the experiments"""
+    buffer_size: int = int(1e5)
+    """the replay memory buffer size"""  # smaller than in original paper but evaluation is done only for 100k steps anyway
+    gamma: float = 0.99
+    """the discount factor gamma"""
+    tau: float = 1.0
+    """target smoothing coefficient (default: 1)"""
+    batch_size: int = 64
+    """the batch size of sample from the reply memory"""
+    learning_starts: int = 2e4
+    """timestep to start learning"""
+    policy_lr: float = 1e-3
+    """the learning rate of the policy network optimizer"""
+    q_lr: float = 2e-3
+    """the learning rate of the Q network network optimizer"""
+    update_frequency: int = 4
+    """the frequency of training updates"""
+    target_network_frequency: int = 8000
+    """the frequency of updates for the target networks"""
+    alpha: float = 0.2
+    """Entropy regularization coefficient."""
+    autotune: bool = True
+    """automatic tuning of the entropy coefficient"""
+    target_entropy_scale: float = 0.89
+    """coefficient for scaling the autotune entropy target"""
+    channels: int = 3
+    """the number of channels"""
+    frame_skip: int = 3
+    """frame skip"""
+    scale_reward: float=0.01
+    'scale reward'
+
 
 class ViZDoomEnv(gymnasium.Env):
 
     def __init__(self,
-                 game: vizdoom.DoomGame, channels = 1):
+                 game: DoomGame, channels = 1):
         super(ViZDoomEnv, self).__init__()
-        n = game.get_available_buttons_size()        
+        n = game.get_available_buttons_size()
         actions = [list(a) for a in itertools.product([0, 1], repeat=n)]
         actions.remove([True, True, True])
         actions.remove([True, True, False])
@@ -61,7 +121,7 @@ class ViZDoomEnv(gymnasium.Env):
             info['reward'] = self.total_reward
             info['length'] = self.total_length
 
-        return self.state, reward, done, info
+        return self.state, reward, done, done, info
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
@@ -85,66 +145,12 @@ class ViZDoomEnv(gymnasium.Env):
         screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
         if screen.ndim == 2:
             screen = np.expand_dims(screen, 0)
+        else:
+            screen = screen.transpose(2, 0, 1)
         return screen
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
         return self.get_screen() if not done else self.empty_frame
-
-
-@dataclass
-class Args:
-    exp_name: str = os.path.basename(__file__)[: -len(".py")]
-    """the name of this experiment"""
-    seed: int = 1
-    """seed of the experiment"""
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
-    track: bool = False
-    """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
-    """the wandb's project name"""
-    wandb_entity: str = None
-    """the entity (team) of wandb's project"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
-
-    # Algorithm specific arguments
-    env_id: str = "basic"
-    """the id of the environment"""
-    total_timesteps: int = 5000000
-    """total timesteps of the experiments"""
-    buffer_size: int = int(1e6)
-    """the replay memory buffer size"""  # smaller than in original paper but evaluation is done only for 100k steps anyway
-    gamma: float = 0.99
-    """the discount factor gamma"""
-    tau: float = 1.0
-    """target smoothing coefficient (default: 1)"""
-    batch_size: int = 128
-    """the batch size of sample from the reply memory"""
-    learning_starts: int = 2e4
-    """timestep to start learning"""
-    policy_lr: float = 3e-4
-    """the learning rate of the policy network optimizer"""
-    q_lr: float = 3e-4
-    """the learning rate of the Q network network optimizer"""
-    update_frequency: int = 4
-    """the frequency of training updates"""
-    target_network_frequency: int = 8000
-    """the frequency of updates for the target networks"""
-    alpha: float = 0.2
-    """Entropy regularization coefficient."""
-    autotune: bool = True
-    """automatic tuning of the entropy coefficient"""
-    target_entropy_scale: float = 0.89
-    """coefficient for scaling the autotune entropy target"""
-    channels: int = 1
-    """the number of channels"""
-    frame_skip: int = 4
-    """frame skip"""
-    scale_reward = 0.01
-    """scale reward"""
 
 
 def create_env() -> ViZDoomEnv:
@@ -152,12 +158,17 @@ def create_env() -> ViZDoomEnv:
     game.load_config(f'scenarios/{args.env_id}.cfg')
     game.set_window_visible(True)
     game.init()
-    return ViZDoomEnv(game, channels=args.channels)
+    # Wrap the game with the Gym adapter.
+    env = ViZDoomEnv(game, channels=args.channels)
+    #env = ClipRewardEnv(env)
+    return env
+
 
 def layer_init(layer, bias_const=0.0):
     nn.init.kaiming_normal_(layer.weight)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
 
 # ALGO LOGIC: initialize agent here:
 # NOTE: Sharing a CNN encoder between Actor and Critics is not recommended for SAC without stopping actor gradients
@@ -225,7 +236,9 @@ class Actor(nn.Module):
         return action, log_prob, action_probs
 
 
-if __name__ == "__main__":    
+
+if __name__ == "__main__":
+
     args = tyro.cli(Args)
     args.seed = int(time.time())
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -257,7 +270,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = create_env()
-    assert isinstance(envs.action_space, gym.spaces.Discrete), "only discrete action space is supported"
+    assert isinstance(envs.action_space, gymnasium.spaces.Discrete), "only discrete action space is supported"
 
     actor = Actor(envs).to(device)
     qf1 = SoftQNetwork(envs).to(device)
@@ -293,23 +306,25 @@ if __name__ == "__main__":
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
-            action = np.array([envs.action_space.sample()])
+            actions = np.array([envs.action_space.sample()])
         else:
-            action, _, _ = actor.get_action(torch.Tensor(obs).to(device).unsqueeze(0))
-            action = action.detach().cpu().numpy()
+            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device).unsqueeze(0))
+            actions = actions.detach().cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rewards, done, infos = envs.step(action[0])
+        next_obs, rewards, done, done, info = envs.step(actions[0])
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        if 'reward' in infos.keys():
-            print(f"global_step={global_step}, episodic_return={infos['reward']}")
-            writer.add_scalar("charts/episodic_return", infos['reward'], global_step)
-        if 'length' in infos.keys():
-            writer.add_scalar("charts/episodic_length", infos['length'], global_step)
 
+        if 'reward' in info.keys():
+            print(f"global_step={global_step}, episodic_return={info['reward']}")
+            writer.add_scalar("charts/episodic_return", info['reward'], global_step)
+        if 'length' in info.keys():
+            writer.add_scalar("charts/episodic_length", info['length'], global_step)
 
-        rb.add(obs, next_obs, action, rewards, done, infos)
+        # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
+        real_next_obs = next_obs.copy()
+        rb.add(obs, real_next_obs, actions, rewards, done, info)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -386,7 +401,7 @@ if __name__ == "__main__":
                 if args.autotune:
                     writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
         if done:
-            obs, _ = envs.reset()                
+            obs, _ = envs.reset()
 
     envs.close()
     writer.close()

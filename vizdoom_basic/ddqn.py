@@ -46,6 +46,7 @@ class ViZDoomEnv(gymnasium.Env):
     def step(self, action: int):
         info = {}
         reward = self.game.make_action(self.possible_actions[action], self.frame_skip)
+        print(reward)
         done = self.game.is_episode_finished()
         self.state = self._get_frame(done)
         reward = reward * self.scale_reward
