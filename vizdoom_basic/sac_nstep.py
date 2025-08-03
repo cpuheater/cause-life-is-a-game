@@ -11,13 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
-from stable_baselines3.common.atari_wrappers import (
-    ClipRewardEnv,
-    EpisodicLifeEnv,
-    FireResetEnv,
-    MaxAndSkipEnv,
-    NoopResetEnv,
-)
+from collections import deque
 import vizdoom
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.distributions.categorical import Categorical
@@ -28,7 +22,6 @@ import itertools
 from gymnasium import spaces
 from gymnasium.spaces import Discrete, Box
 from typing import Optional
-from collections import deque
 
 @dataclass
 class Args:
@@ -60,17 +53,17 @@ class Args:
     """the discount factor gamma"""
     tau: float = 1.0
     """target smoothing coefficient (default: 1)"""
-    batch_size: int = 256
+    batch_size: int = 64
     """the batch size of sample from the reply memory"""
     learning_starts: int = 2e4
     """timestep to start learning"""
-    policy_lr: float = 3e-4
+    policy_lr: float = 1e-3
     """the learning rate of the policy network optimizer"""
-    q_lr: float = 3e-4
+    q_lr: float = 2e-3
     """the learning rate of the Q network network optimizer"""
-    update_frequency: int = 3
+    update_frequency: int = 4
     """the frequency of training updates"""
-    target_network_frequency: int = 8000
+    target_network_frequency: int = 4000
     """the frequency of updates for the target networks"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
@@ -82,7 +75,7 @@ class Args:
     """the number of channels"""
     frame_skip: int = 3
     """frame skip"""
-    scale_reward: float=1
+    scale_reward: float=0.01
     'scale reward'
     n_step: int = 3
     """"""
@@ -124,7 +117,7 @@ class ReplayBufferNStep(object):
             rewards.append(reward)
             obses_tp1.append(np.array(obs_tp1, copy=False))
             dones.append(done)
-        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)    
 
 
 class ViZDoomEnv(gymnasium.Env):
@@ -201,8 +194,9 @@ def create_env() -> ViZDoomEnv:
     game.set_window_visible(True)
     game.init()
     # Wrap the game with the Gym adapter.
-    return ViZDoomEnv(game, channels=args.channels)
-
+    env = ViZDoomEnv(game, channels=args.channels)
+    #env = ClipRewardEnv(env)
+    return env
 
 
 def layer_init(layer, bias_const=0.0):
@@ -271,7 +265,6 @@ class Actor(nn.Module):
         logits = self(x / 255.0)
         policy_dist = Categorical(logits=logits)
         action = policy_dist.sample()
-        # Action probabilities for calculating the adapted soft-Q loss
         action_probs = policy_dist.probs
         log_prob = F.log_softmax(logits, dim=1)
         return action, log_prob, action_probs
@@ -281,6 +274,7 @@ class Actor(nn.Module):
 if __name__ == "__main__":
 
     args = tyro.cli(Args)
+    args.seed = int(time.time())
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -332,8 +326,14 @@ if __name__ == "__main__":
     else:
         alpha = args.alpha
 
+    rb = ReplayBuffer(
+        args.buffer_size,
+        envs.observation_space,
+        envs.action_space,
+        device,
+        handle_timeout_termination=False,
+    )
     rb=ReplayBufferNStep(args.buffer_size, args.n_step, args.gamma)
-
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
@@ -359,6 +359,7 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
+        #rb.add(obs, real_next_obs, actions, rewards, done, info)
         rb.add(obs, actions, rewards, real_next_obs, done)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
@@ -367,38 +368,39 @@ if __name__ == "__main__":
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             if global_step % args.update_frequency == 0:
-                s_obs, s_actions, s_rewards, s_next_obses, s_dones = tuple(map(lambda e: torch.as_tensor(e, device=device), rb.sample(args.batch_size)))
+                #data = rb.sample(args.batch_size)
+                observations, actions, rewards, next_observations, dones = tuple(map(lambda e: torch.as_tensor(e, device=device), rb.sample(args.batch_size)))
                 # CRITIC training
                 with torch.no_grad():
-                    _, next_state_log_pi, next_state_action_probs = actor.get_action(s_next_obses)
-                    qf1_next_target = qf1_target(s_next_obses)
-                    qf2_next_target = qf2_target(s_next_obses)
+                    _, next_state_log_pi, next_state_action_probs = actor.get_action(next_observations)
+                    qf1_next_target = qf1_target(next_observations)
+                    qf2_next_target = qf2_target(next_observations)
                     # we can use the action probabilities instead of MC sampling to estimate the expectation
                     min_qf_next_target = next_state_action_probs * (
                         torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                     )
                     # adapt Q-target for discrete Q-function
                     min_qf_next_target = min_qf_next_target.sum(dim=1)
-                    next_q_value = s_rewards.float().flatten() + (1 - s_dones.int().flatten()) * (args.gamma ** args.n_step) * (min_qf_next_target)
+                    next_q_value = rewards.flatten().float() + (dones.flatten().logical_not().int()) * args.gamma * (min_qf_next_target)
 
                 # use Q-values only for the taken actions
-                qf1_values = qf1(s_obs)
-                qf2_values = qf2(s_obs)
-                qf1_a_values = qf1_values.gather(1, s_actions.long()).view(-1)
-                qf2_a_values = qf2_values.gather(1, s_actions.long()).view(-1)
+                qf1_values = qf1(observations)
+                qf2_values = qf2(observations)
+                qf1_a_values = qf1_values.gather(1, actions.long()).view(-1)
+                qf2_a_values = qf2_values.gather(1, actions.long()).view(-1)
                 qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
                 qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
                 qf_loss = qf1_loss + qf2_loss
 
-                q_optimizer.zero_grad()
+                q_optimizer.zero_grad()                                                     
                 qf_loss.backward()
                 q_optimizer.step()
 
                 # ACTOR training
-                _, log_pi, action_probs = actor.get_action(s_obs)
+                _, log_pi, action_probs = actor.get_action(observations)
                 with torch.no_grad():
-                    qf1_values = qf1(s_obs)
-                    qf2_values = qf2(s_obs)
+                    qf1_values = qf1(observations)
+                    qf2_values = qf2(observations)
                     min_qf_values = torch.min(qf1_values, qf2_values)
                 # no need for reparameterization, the expectation can be calculated for discrete actions
                 actor_loss = (action_probs * ((alpha * log_pi) - min_qf_values)).mean()
@@ -436,7 +438,7 @@ if __name__ == "__main__":
                 if args.autotune:
                     writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
         if done:
-           obs, _ = envs.reset()
+            obs, _ = envs.reset()
 
     envs.close()
     writer.close()
