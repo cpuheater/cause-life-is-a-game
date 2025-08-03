@@ -11,14 +11,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
-from stable_baselines3.common.atari_wrappers import (
-    ClipRewardEnv,
-    EpisodicLifeEnv,
-    FireResetEnv,
-    MaxAndSkipEnv,
-    NoopResetEnv,
-)
 import vizdoom
+from gymnasium.wrappers import GrayScaleObservation, FrameStack
+from gymnasium.wrappers.frame_stack import LazyFrames
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
@@ -84,6 +79,17 @@ class Args:
     scale_reward: float=0.01
     'scale reward'
 
+class LazyFramesToNumpyWrapper(gymnasium.ObservationWrapper): # subclass obswrapper
+  def __init__(self, env):
+      super().__init__(env)
+      self.env = env # the environment that we want to convert
+
+  def observation(self, observation):
+      # if its a LazyFrames object then turn it into a numpy array
+      if isinstance(observation, LazyFrames):
+          return np.array(observation)
+      return observation
+  
 
 class ViZDoomEnv(gymnasium.Env):
 
@@ -99,7 +105,7 @@ class ViZDoomEnv(gymnasium.Env):
 
         h, w = game.get_screen_height(), game.get_screen_width()
         IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
-        self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
+        self.observation_space = spaces.Box(low=0, high=255, shape=(IMAGE_HEIGHT, IMAGE_WIDTH, channels), dtype=np.uint8)
 
         # Assign other variables
         self.game = game
@@ -141,12 +147,12 @@ class ViZDoomEnv(gymnasium.Env):
 
     def get_screen(self):
         screen = self.game.get_state().screen_buffer
-        channels, h, w = self.observation_space.shape
+        h, w, channels = self.observation_space.shape
         screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
-        if screen.ndim == 2:
-            screen = np.expand_dims(screen, 0)
-        else:
-            screen = screen.transpose(2, 0, 1)
+        #if screen.ndim == 2:
+        #    screen = np.expand_dims(screen, 0)
+        #else:
+        #    screen = screen.transpose(2, 0, 1)
         return screen
 
     def _get_frame(self, done: bool = False) -> np.ndarray:
@@ -160,7 +166,10 @@ def create_env() -> ViZDoomEnv:
     game.init()
     # Wrap the game with the Gym adapter.
     env = ViZDoomEnv(game, channels=args.channels)
-    #env = ClipRewardEnv(env)
+    env = GrayScaleObservation(env)
+    env = FrameStack(env, 3)
+    env = LazyFramesToNumpyWrapper(env)
+    #env = ImageToPyTorch(env)
     return env
 
 
@@ -230,6 +239,7 @@ class Actor(nn.Module):
         logits = self(x / 255.0)
         policy_dist = Categorical(logits=logits)
         action = policy_dist.sample()
+        # Action probabilities for calculating the adapted soft-Q loss
         action_probs = policy_dist.probs
         log_prob = F.log_softmax(logits, dim=1)
         return action, log_prob, action_probs
