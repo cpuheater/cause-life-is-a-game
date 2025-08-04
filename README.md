@@ -16,6 +16,7 @@ experiment management with [weights and biases](https://wandb.ai/site).
 * ddqn - Double DQN (https://arxiv.org/abs/1509.06461)
 * dueling_dqn - Dueling DQN (https://arxiv.org/abs/1511.06581)
 * ppo_slstm - xLSTM: Extended Long Short-Term Memory (https://arxiv.org/abs/2405.04517)
+* spo - SPO (https://arxiv.org/abs/2401.16025)
 
 ### List of extensions:
 * ppo_separate - separate network for the actor and the critic
