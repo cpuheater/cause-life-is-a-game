@@ -6,7 +6,6 @@ import gym
 from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-import skimage.transform
 from gym_minigrid.wrappers import *
 cv2.ocl.setUseOpenCL(False)
 from matplotlib import pyplot as plt
@@ -44,8 +43,6 @@ import argparse
 from distutils.util import strtobool
 import numpy as np
 import gym
-from gym.wrappers import TimeLimit, Monitor
-import pybullet_envs
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random

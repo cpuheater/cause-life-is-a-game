@@ -6,7 +6,6 @@ import gym
 from gym import spaces
 import cv2
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution
-import skimage.transform
 from gym_minigrid.wrappers import *
 cv2.ocl.setUseOpenCL(False)
 
