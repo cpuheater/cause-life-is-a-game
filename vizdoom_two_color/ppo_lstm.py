@@ -7,7 +7,6 @@ from gymnasium import spaces
 from gymnasium.spaces import Discrete, Box
 import cv2
 from vizdoom import GameVariable, Button
-import skimage.transform
 import gymnasium
 
 cv2.ocl.setUseOpenCL(False)
