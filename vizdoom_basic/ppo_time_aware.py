@@ -104,6 +104,8 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
+
+IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
 class ViZDoomEnv(gymnasium.Env):
 
     def __init__(self,
@@ -115,18 +117,18 @@ class ViZDoomEnv(gymnasium.Env):
         actions.remove([True, True, False])
         self.actions = actions
         self.action_space = spaces.Discrete(len(actions))
-
         h, w = game.get_screen_height(), game.get_screen_width()
-        IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
-        self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
+        self.observation_space = spaces.Tuple((spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8),
+                                              spaces.Box(float(0.0), float(1.0), (1,))))
 
         # Assign other variables
         self.game = game
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
-        self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
+        self.empty_frame = np.zeros(self.observation_space[0].shape, dtype=np.uint8)
         self.state = self.empty_frame
         self.channels = channels
+        self.max_steps = self.game.get_episode_timeout()
 
     def step(self, action: int):
         info = {}
@@ -136,11 +138,12 @@ class ViZDoomEnv(gymnasium.Env):
         reward = reward * self.scale_reward
         self.total_reward += reward
         self.total_length += 1
+        time_obs = self.total_length * self.frame_skip / self.game.get_episode_timeout()
         if done:
             info['reward'] = self.total_reward
             info['length'] = self.total_length
-
-        return self.state, reward, done, done, info
+            info['time_obs'] = time_obs   
+        return (self.state, np.array([time_obs], 'f')), reward, done, done, info
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
@@ -149,8 +152,8 @@ class ViZDoomEnv(gymnasium.Env):
         self.game.new_episode()
         self.state = self._get_frame()
         self.total_reward = 0
-        self.total_length = 0
-        return self.state, {}
+        self.total_length = 0        
+        return (self.state, np.zeros(1, dtype=float)), {}
 
     def close(self) -> None:
         self.game.close()
@@ -160,7 +163,7 @@ class ViZDoomEnv(gymnasium.Env):
 
     def get_screen(self):
         screen = self.game.get_state().screen_buffer
-        channels, h, w = self.observation_space.shape
+        channels, h, w = self.observation_space[0].shape
         screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
         if screen.ndim == 2:
             screen = np.expand_dims(screen, 0)
@@ -178,20 +181,22 @@ class VecPyTorch(VecEnvWrapper):
         self.device = device
 
     def reset(self):
-        obs  = self.venv.reset()
+        (obs, time_obs)  = self.venv.reset()
+        time_obs = torch.from_numpy(time_obs).float().to(self.device)
         obs = torch.from_numpy(obs).float().to(self.device)
-        return obs
+        return (obs, time_obs)
 
     def step_async(self, actions):
         actions = actions.cpu().numpy()
         self.venv.step_async(actions)
 
     def step_wait(self):
-        obs, reward, done, info = self.venv.step_wait()
+        (obs, time_obs), reward, done, info = self.venv.step_wait()
         #done = np.logical_or(terminations, truncations)
         obs = torch.from_numpy(obs).float().to(self.device)
+        time_obs = torch.from_numpy(time_obs).float().to(self.device)
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
-        return obs, reward, done, info
+        return (obs, time_obs), reward, done, info
 
 
 # TRY NOT TO MODIFY: setup the environment
@@ -258,14 +263,19 @@ class Agent(nn.Module):
             layer_init(nn.Linear(2560, 512)),
             nn.ReLU()
         )
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
+        self.fc = nn.Sequential(layer_init(nn.Linear(513, 128)), nn.ReLU())
+        self.actor = layer_init(nn.Linear(128, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(128, 1), std=1)
 
-    def forward(self, x):
-        return self.network(x)
+    def forward(self, x, time):
+        x = self.network(x)
+        x = x.reshape(x.shape[0], -1)
+        x = torch.cat([x, time], dim=1)
+        x = self.fc(x)
+        return x 
 
-    def get_action(self, x, action=None):
-        x = self.forward(x)
+    def get_action(self, x, time, action=None):
+        x = self.forward(x, time)
         value = self.critic(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
@@ -273,8 +283,8 @@ class Agent(nn.Module):
             action = probs.sample()
         return value, action, probs.log_prob(action), probs.entropy()
 
-    def get_value(self, x):
-        return self.critic(self.forward(x))
+    def get_value(self, x, time):
+        return self.critic(self.forward(x, time))
 
 agent = Agent(envs, args.channels).to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -283,7 +293,8 @@ if args.anneal_lr:
     lr = lambda f: f * args.learning_rate
 
 # ALGO Logic: Storage for epoch data
-obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+times = torch.zeros((args.num_steps, args.num_envs) + (1,)).to(device)
+obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space[0].shape).to(device)
 actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
 rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -295,7 +306,7 @@ global_step = 0
 start_time = time.time()
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
-next_obs = envs.reset()
+(next_obs, next_time_obs) = envs.reset()
 next_done = torch.zeros(args.num_envs).to(device)
 num_updates = args.total_timesteps // args.batch_size
 for update in range(1, num_updates+1):
@@ -309,18 +320,19 @@ for update in range(1, num_updates+1):
     for step in range(0, args.num_steps):
         global_step += 1 * args.num_envs
         obs[step] = next_obs
+        times[step] = next_time_obs
         dones[step] = next_done
 
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
-            value, action, logproba, _ = agent.get_action(obs[step])
+            value, action, logproba, _ = agent.get_action(obs[step], times[step])
 
         values[step] = value.flatten()
         actions[step] = action
         logprobs[step] = logproba
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rs, ds, infos = envs.step(action)
+        (next_obs, time_obs), rs, ds, infos = envs.step(action)
         rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
 
         #for info in infos:
@@ -334,10 +346,12 @@ for update in range(1, num_updates+1):
                 writer.add_scalar("charts/episodic_return", info['reward'], global_step)
             if 'length' in info.keys():
                 writer.add_scalar("charts/episodic_length", info['length'], global_step)
+            if 'time_obs' in info.keys():
+                writer.add_scalar("charts/time_obs", info['time_obs'], global_step)        
 
     # bootstrap reward if not done. reached the batch limit
     with torch.no_grad():
-        last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
+        last_value = agent.get_value(next_obs.to(device), time_obs.to(device)).reshape(1, -1)
         if args.gae:
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
@@ -364,12 +378,13 @@ for update in range(1, num_updates+1):
             advantages = returns - values
 
     # flatten the batch
-    b_obs = obs.reshape((-1,)+envs.observation_space.shape)
+    b_obs = obs.reshape((-1,)+envs.observation_space[0].shape)    
     b_logprobs = logprobs.reshape(-1)
     b_actions = actions.reshape((-1,)+envs.action_space.shape)
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
+    b_times = times.view(-1, 1)
 
     # Optimizaing the policy and value network
     inds = np.arange(args.batch_size,)
@@ -382,7 +397,7 @@ for update in range(1, num_updates+1):
             if args.norm_adv:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-            _, _, newlogproba, entropy = agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
+            _, _, newlogproba, entropy = agent.get_action(b_obs[minibatch_ind], b_times[minibatch_ind], b_actions.long()[minibatch_ind])
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
             # Stats
@@ -395,7 +410,7 @@ for update in range(1, num_updates+1):
             entropy_loss = entropy.mean()
 
             # Value loss
-            new_values = agent.get_value(b_obs[minibatch_ind]).view(-1)
+            new_values = agent.get_value(b_obs[minibatch_ind], b_times[minibatch_ind]).view(-1)
             if args.clip_vloss:
                 v_loss_unclipped = ((new_values - b_returns[minibatch_ind]) ** 2)
                 v_clipped = b_values[minibatch_ind] + torch.clamp(new_values - b_values[minibatch_ind], -args.clip_coef, args.clip_coef)
