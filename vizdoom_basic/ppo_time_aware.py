@@ -104,8 +104,6 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-
-IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
 class ViZDoomEnv(gymnasium.Env):
 
     def __init__(self,
@@ -118,6 +116,7 @@ class ViZDoomEnv(gymnasium.Env):
         self.actions = actions
         self.action_space = spaces.Discrete(len(actions))
         h, w = game.get_screen_height(), game.get_screen_width()
+        IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
         self.observation_space = spaces.Tuple((spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8),
                                               spaces.Box(float(0.0), float(1.0), (1,))))
 

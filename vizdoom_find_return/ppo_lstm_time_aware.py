@@ -70,7 +70,8 @@ class ViZDoomEnv(gymnasium.Env):
         super(ViZDoomEnv, self).__init__()
         h, w = game.get_screen_height(), game.get_screen_width()
         IMAGE_WIDTH, IMAGE_HEIGHT = 112, 64
-        self.observation_space = spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
+        self.observation_space = spaces.Tuple((spaces.Box(low=0, high=255, shape=(channels, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8),
+                                              spaces.Box(float(0.0), float(1.0), (1,))))
 
         # Assign other variables
         self.game = game
@@ -78,7 +79,7 @@ class ViZDoomEnv(gymnasium.Env):
         self.action_space = spaces.Discrete(len(self.actions))
         self.frame_skip = args.frame_skip
         self.scale_reward = args.scale_reward
-        self.empty_frame = np.zeros(self.observation_space.shape, dtype=np.uint8)
+        self.empty_frame = np.zeros(self.observation_space[0].shape, dtype=np.uint8)
         self.state = self.empty_frame
         self.channels = channels
         self.prev_pos = None
@@ -105,12 +106,14 @@ class ViZDoomEnv(gymnasium.Env):
         reward = reward * self.scale_reward
         self.total_reward += reward
         self.total_length += 1
+        time_obs = self.total_length * self.frame_skip / self.game.get_episode_timeout() * 0.1
         if done:
             info['reward'] = self.total_reward
             info['length'] = self.total_length
             info['goal_reached'] = goal_reached
+            info['time_obs'] = time_obs
         self.prev_pos = curr_pos
-        return self.state, reward, done, done, info
+        return (self.state, np.array([time_obs], 'f')), reward, done, done, info
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
@@ -122,7 +125,7 @@ class ViZDoomEnv(gymnasium.Env):
         self.total_length = 0
         self.prev_pos = self._get_game_variables()
         self.sub_goal = False
-        return self.state, {}
+        return (self.state, np.zeros(1, dtype=float)), {}
 
     def shape_reward(self, reward, curr_pos, prev_pos):
         dist = np.sqrt(np.sum((curr_pos - prev_pos) ** 2))
@@ -138,7 +141,7 @@ class ViZDoomEnv(gymnasium.Env):
 
     def get_screen(self):
         screen = self.game.get_state().screen_buffer
-        channels, h, w = self.observation_space.shape
+        channels, h, w = self.observation_space[0].shape
         screen = cv2.resize(screen, (w, h), cv2.INTER_AREA)
         if screen.ndim == 2:
             screen = np.expand_dims(screen, 0)
@@ -159,20 +162,22 @@ class VecPyTorch(VecEnvWrapper):
         self.device = device
 
     def reset(self):
-        obs  = self.venv.reset()
+        (obs, time_obs)  = self.venv.reset()
+        time_obs = torch.from_numpy(time_obs).float().to(self.device)
         obs = torch.from_numpy(obs).float().to(self.device)
-        return obs
+        return (obs, time_obs)
 
     def step_async(self, actions):
         actions = actions.cpu().numpy()
         self.venv.step_async(actions)
 
     def step_wait(self):
-        obs, reward, done, info = self.venv.step_wait()
+        (obs, time_obs), reward, done, info = self.venv.step_wait()
         #done = np.logical_or(terminations, truncations)
         obs = torch.from_numpy(obs).float().to(self.device)
+        time_obs = torch.from_numpy(time_obs).float().to(self.device)
         reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
-        return obs, reward, done, info
+        return (obs, time_obs), reward, done, info
 
 def create_env() -> ViZDoomEnv:
     def thunk():
@@ -213,10 +218,11 @@ class Agent(nn.Module):
                 nn.init.constant_(param, 0)
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
+        self.fc = nn.Sequential(layer_init(nn.Linear(rnn_hidden_size+1, rnn_hidden_size)), nn.ReLU())        
         self.actor = layer_init(nn.Linear(rnn_hidden_size, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
-    def forward(self, x, rnn_state, sequence_length=1):
+    def forward(self, x, time, rnn_state, sequence_length=1):
         x = x / 255
         x = self.network(x)
         if sequence_length == 1:
@@ -228,15 +234,17 @@ class Agent(nn.Module):
             x, rnn_state = self.rnn(x, rnn_state)
             x_shape = tuple(x.size())
             x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
+        x = torch.cat([x, time], dim=1)
+        x = self.fc(x)    
         return x, rnn_state
 
-    def get_logits(self, x, rnn_state):
-        x, rnn_state = self.forward(x, rnn_state, sequence_length = 1)
+    def get_logits(self, x, time, rnn_state):
+        x, rnn_state = self.forward(x, time, rnn_state, sequence_length = 1)
         logits = self.actor(x)
         return rnn_state, logits
     
-    def get_action(self, x, rnn_state, sequence_length=1, action=None):
-        x, rnn_state = self.forward(x, rnn_state, sequence_length)
+    def get_action(self, x, time, rnn_state, sequence_length=1, action=None):
+        x, rnn_state = self.forward(x, time, rnn_state, sequence_length)
         value = self.critic(x)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
@@ -244,15 +252,16 @@ class Agent(nn.Module):
             action = probs.sample()
         return value, rnn_state, action, probs.log_prob(action), probs.entropy()
 
-    def get_value(self, x, rnn_state):
-        x, _ = self.forward(x, rnn_state)
+    def get_value(self, x, time, rnn_state):
+        x, _ = self.forward(x, time, rnn_state)
         return self.critic(x)
 
-def recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states):
+def recurrent_generator(episode_done_indices, obs, times, actions, logprobs, values, advantages, returns, rnn_hidden_states, cell_hidden_states):
 
     # Supply training samples
     samples = {
         'vis_obs': obs.permute(1, 0, 2, 3, 4).cpu().numpy(),
+        'times': times.permute(1, 0, 2).cpu().numpy(),
         'actions': actions.permute(1, 0).cpu().numpy(),
         'values': values.permute(1, 0).cpu().numpy(),
         'log_probs': logprobs.permute(1, 0).cpu().numpy(),
@@ -468,7 +477,8 @@ if __name__ == "__main__":
         lr = lambda f: f * args.learning_rate
 
     # ALGO Logic: Storage for epoch data
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+    times = torch.zeros((args.num_steps, args.num_envs) + (1,)).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space[0].shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -484,7 +494,7 @@ if __name__ == "__main__":
     start_time = time.time()
     # Note how `next_obs` and `next_done` are used; their usage is equivalent to
     # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
-    next_obs = envs.reset()
+    (next_obs, next_time_obs) = envs.reset()
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
     rnn_hidden_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
@@ -501,20 +511,21 @@ if __name__ == "__main__":
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs
             obs[step] = next_obs
+            times[step] = next_time_obs
             dones[step] = next_done
             rnn_hidden_states[step] = rnn_hidden_state
             rnn_cell_states[step] = rnn_cell_state
 
             # ALGO LOGIC: put action logic here
             with torch.no_grad():
-                value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], (rnn_hidden_state, rnn_cell_state))
+                value, (rnn_hidden_state, rnn_cell_state), action, logproba, _ = agent.get_action(obs[step], times[step], (rnn_hidden_state, rnn_cell_state))
 
             values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logproba
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, rs, ds, infos = envs.step(action)
+            (next_obs, next_time_obs), rs, ds, infos = envs.step(action)
             rewards[step], next_done = rs.view(-1), torch.Tensor(ds).to(device)
             mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
             rnn_hidden_state = rnn_hidden_state * mask
@@ -534,11 +545,13 @@ if __name__ == "__main__":
                     if len(goals) == args.num_envs:
                         writer.add_scalar("charts/goal_reached", sum(goals), global_step)
                         goals = []
+                if 'time_obs' in info.keys():
+                    writer.add_scalar("charts/time_obs", info['time_obs'], global_step)        
 
 
         # bootstrap reward if not done. reached the batch limit
         with torch.no_grad():
-            last_value = agent.get_value(next_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
+            last_value = agent.get_value(next_obs.to(device), next_time_obs.to(device), (rnn_hidden_state, rnn_cell_state)).reshape(1, -1)
             if args.gae:
                 advantages = torch.zeros_like(rewards).to(device)
                 lastgaelam = 0
@@ -565,19 +578,20 @@ if __name__ == "__main__":
                 advantages = returns - values
 
         # flatten the batch
-        b_obs = obs.reshape((-1,)+envs.observation_space.shape)
+        b_obs = obs.reshape((-1,)+envs.observation_space[0].shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,)+envs.action_space.shape)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
+        b_times = times.view(-1, 1)
 
         # Optimizaing the policy and value network
         for i_epoch_pi in range(args.update_epochs):
-            data_generator = recurrent_generator(episode_done_indices, obs, actions, logprobs, values, advantages, returns,
+            data_generator = recurrent_generator(episode_done_indices, obs, times, actions, logprobs, values, advantages, returns,
                                                 rnn_hidden_states, rnn_cell_states)
             for batch in data_generator:
-                b_obs, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['actions'], \
+                b_obs, b_times, b_actions, b_values, b_returns, b_logprobs, b_advantages, b_rnn_hidden_states, b_rnn_cell_states, b_loss_mask = batch['vis_obs'], batch['times'], batch['actions'], \
                                                                                                                         batch['values'], batch['returns'], \
                                                                                                                         batch['log_probs'], batch['advantages'], \
                                                                                                                         batch["hxs"], batch["cxs"], batch["loss_mask"]
@@ -585,7 +599,7 @@ if __name__ == "__main__":
                 if args.norm_adv:
                     b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-                newvalues, rnn_states, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
+                newvalues, rnn_states, _, newlogproba, entropy = agent.get_action(b_obs, b_times, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
                                                                         sequence_length=max_sequence_length, action=b_actions.long())
                 ratio = (newlogproba - b_logprobs).exp()
 
