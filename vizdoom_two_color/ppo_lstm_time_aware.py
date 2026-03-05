@@ -209,7 +209,7 @@ class Agent(nn.Module):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(2560, rnn_hidden_size)),
+            layer_init(nn.Linear(2560, rnn_hidden_size-1)),
             nn.ReLU()
         )
         self.rnn = nn.LSTM(rnn_hidden_size, rnn_hidden_size, batch_first=True)
@@ -218,13 +218,14 @@ class Agent(nn.Module):
                 nn.init.constant_(param, 0)
             elif 'weight' in name:
                 nn.init.orthogonal_(param, np.sqrt(2))
-        self.fc = nn.Sequential(layer_init(nn.Linear(rnn_hidden_size+1, rnn_hidden_size)), nn.ReLU())                
+        #self.fc = nn.Sequential(layer_init(nn.Linear(rnn_hidden_size, rnn_hidden_size)), nn.ReLU())                
         self.actor = layer_init(nn.Linear(rnn_hidden_size, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
     def forward(self, x, time, rnn_state, sequence_length=1):
         x = x / 255
         x = self.network(x)
+        x = torch.cat([x, time], dim=1)
         if sequence_length == 1:
             x, rnn_state = self.rnn(x.unsqueeze(1), rnn_state)
             x = x.squeeze(1)
@@ -233,9 +234,7 @@ class Agent(nn.Module):
             x = x.reshape((x_shape[0] // sequence_length), sequence_length, x_shape[1])
             x, rnn_state = self.rnn(x, rnn_state)
             x_shape = tuple(x.size())
-            x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])
-        x = torch.cat([x, time], dim=1)
-        x = self.fc(x)    
+            x = x.reshape(x_shape[0] * x_shape[1], x_shape[2])    
         return x, rnn_state
 
     def get_logits(self, x, time, rnn_state):

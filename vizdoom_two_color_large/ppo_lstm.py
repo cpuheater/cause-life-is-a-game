@@ -179,7 +179,7 @@ def create_env() -> ViZDoomEnv:
     def thunk():
         game = vizdoom.DoomGame()
         game.load_config(f'scenarios/{args.env_id}.cfg')
-        game.set_window_visible(False)
+        game.set_window_visible(True)
         game.init()
         # Wrap the game with the Gym adapter.
         return ViZDoomEnv(game, channels=args.channels)
@@ -526,7 +526,7 @@ if __name__ == "__main__":
 
             for info in infos:
                 if 'reward' in info.keys():
-                    print(f"global_step={global_step}, episodic_return={info['reward']}")
+                    print(f"({device}) global_step={global_step}, episodic_return={info['reward']}")
                     writer.add_scalar("charts/episodic_return", info['reward'], global_step)
                 if 'length' in info.keys():
                     writer.add_scalar("charts/episodic_length", info['length'], global_step)

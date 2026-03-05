@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 
 @dataclass
 class Args:
-    env_id: str = "k_item"
+    env_id: str = "two_color"
     """the id of the environment"""
     num_actions: int = 17
     """num actions"""
@@ -30,7 +30,7 @@ class Args:
     """"""
     render: bool = True
     """"""
-    rnn_hidden_size = 512
+    rnn_hidden_size = 256
     """"""
     capture_video = False
 
