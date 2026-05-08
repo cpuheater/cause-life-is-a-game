@@ -3,143 +3,97 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class CausalConv1D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, **kwargs):
-        super(CausalConv1D, self).__init__()
-        self.padding = (kernel_size - 1) * dilation
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, padding=self.padding, dilation=dilation, **kwargs)
+class LayerNorm(nn.Module):
+    def __init__(self, ndim, bias):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
 
-    def forward(self, x):
-        x = self.conv(x)
-        return x[:, :, :-self.padding]
-
-class BlockDiagonal(nn.Module):
-    def __init__(self, in_features, out_features, num_blocks):
-        super(BlockDiagonal, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.num_blocks = num_blocks
-
-        assert out_features % num_blocks == 0
-
-        block_out_features = out_features // num_blocks
-
-        self.blocks = nn.ModuleList([
-            nn.Linear(in_features, block_out_features)
-            for _ in range(num_blocks)
-        ])
-
-    def forward(self, x):
-        x = [block(x) for block in self.blocks]
-        x = torch.cat(x, dim=-1)
-        return x
-
-class sLSTMBlock(nn.Module):
-    def __init__(self, input_size, head_size, num_heads, proj_factor=4/3):
-        super(sLSTMBlock, self).__init__()
-        self.input_size = input_size
-        self.head_size = head_size
-        self.hidden_size = head_size * num_heads
-        self.num_heads = num_heads
-        self.proj_factor = proj_factor
-
-        assert proj_factor > 0
-
-        self.layer_norm = nn.LayerNorm(input_size)
-        self.causal_conv = CausalConv1D(1, 1, 4)
-
-        self.Wz = BlockDiagonal(input_size, self.hidden_size, num_heads)
-        self.Wi = BlockDiagonal(input_size, self.hidden_size, num_heads)
-        self.Wf = BlockDiagonal(input_size, self.hidden_size, num_heads)
-        self.Wo = BlockDiagonal(input_size, self.hidden_size, num_heads)
-
-        self.Rz = BlockDiagonal(self.hidden_size, self.hidden_size, num_heads)
-        self.Ri = BlockDiagonal(self.hidden_size, self.hidden_size, num_heads)
-        self.Rf = BlockDiagonal(self.hidden_size, self.hidden_size, num_heads)
-        self.Ro = BlockDiagonal(self.hidden_size, self.hidden_size, num_heads)
-
-        self.group_norm = nn.GroupNorm(num_heads, self.hidden_size)
-
-        self.up_proj_left = nn.Linear(self.hidden_size, int(self.hidden_size * proj_factor))
-        self.up_proj_right = nn.Linear(self.hidden_size, int(self.hidden_size * proj_factor))
-        self.down_proj = nn.Linear(int(self.hidden_size * proj_factor), input_size)
-
-    def forward(self, x, prev_state):
-        assert x.size(-1) == self.input_size
-        h_prev, c_prev, n_prev, m_prev = prev_state
-
-        h_prev = h_prev.to(x.device)
-        c_prev = c_prev.to(x.device)
-        n_prev = n_prev.to(x.device)
-        m_prev = m_prev.to(x.device)
-
-        x_norm = self.layer_norm(x)
-        x_conv = F.silu(self.causal_conv(x_norm.unsqueeze(1)).squeeze(1))
-
-        z = torch.tanh(self.Wz(x_norm) + self.Rz(h_prev))
-        o = torch.sigmoid(self.Wo(x_norm) + self.Ro(h_prev))
-        i_tilde = self.Wi(x_conv) + self.Ri(h_prev)
-        f_tilde = self.Wf(x_conv) + self.Rf(h_prev)
-
-        m_t = torch.max(f_tilde + m_prev, i_tilde)
-        i = torch.exp(i_tilde - m_t)
-        f = torch.exp(f_tilde + m_prev - m_t)
-
-        c_t = f * c_prev + i * z
-        n_t = f * n_prev + i
-        h_t = o * c_t / n_t
-
-        output = h_t
-        output_norm = self.group_norm(output)
-        output_left = self.up_proj_left(output_norm)
-        output_right = self.up_proj_right(output_norm)
-        output_gated = F.gelu(output_right)
-        output = output_left * output_gated
-        output = self.down_proj(output)
-        final_output = output + x
-
-        return final_output, (h_t, c_t, n_t, m_t)
+    def forward(self, input):
+        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 class sLSTM(nn.Module):
-    def __init__(self, input_size, head_size, num_heads, num_layers=1, batch_first=False, proj_factor=4/3):
-        super(sLSTM, self).__init__()
-        self.input_size = input_size
-        self.head_size = head_size
-        self.hidden_size = head_size * num_heads
-        self.num_heads = num_heads
-        self.num_layers = num_layers
-        self.batch_first = batch_first
-        self.proj_factor_slstm = proj_factor
+    def __init__(self, config):
+        super().__init__()
+        self.W = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.U = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.o_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.f_bias = nn.Parameter(torch.zeros(config.n_embd).fill_(3.0))  # Initialize with values between 3 and 6
+        self.dropout = nn.Dropout(config.dropout)
 
-        self.layers = nn.ModuleList([sLSTMBlock(input_size, head_size, num_heads, proj_factor) for _ in range(num_layers)])
+    def forward(self, x, hidden_states):
+        batch_size, seq_len, _ = x.size()
 
-    def forward(self, x, state=None):
-        assert x.ndim == 3
-        if self.batch_first: x = x.transpose(0, 1)
-        seq_len, batch_size, _ = x.size()
+        Z = self.W(x) + self.U(hidden_states)
+        i, f, c, o = Z.chunk(4, dim=-1)
 
-        if state is not None:
-            state = torch.stack(list(state)).to(x.device)
-            assert state.ndim == 4
-            num_hidden, state_num_layers, state_batch_size, state_input_size = state.size()
-            assert num_hidden == 4
-            assert state_num_layers == self.num_layers
-            assert state_batch_size == batch_size
-            assert state_input_size == self.input_size
-            state = state.transpose(0, 1)
-        else:
-            state = torch.zeros(self.num_layers, 4, batch_size, self.hidden_size, device=x.device)
+        # Stabilization technique to avoid overflow
+        stab_factor = torch.max(torch.max(i), torch.max(f))
+        i = torch.exp(i - stab_factor)
+        f = torch.exp(f + self.f_bias - stab_factor)
 
-        output = []
-        for t in range(seq_len):
-            x_t = x[t]
-            for layer in range(self.num_layers):
-                x_t, state_tuple = self.layers[layer](x_t, tuple(state[layer].clone()))
-                state[layer] = torch.stack(list(state_tuple))
-            output.append(x_t)
+        cell_state = f * hidden_states + i * torch.tanh(c)
+        normalizer_state = f + i
 
-        output = torch.stack(output)
-        if self.batch_first:
-            output = output.transpose(0, 1)
-        state = tuple(state.transpose(0, 1))
-        return output, state
+        cell_state = cell_state / normalizer_state
+
+        o = torch.sigmoid(o)
+        hidden_state = o * torch.tanh(cell_state)
+
+        hidden_state = self.o_proj(hidden_state)
+        hidden_state = self.dropout(hidden_state)
+
+        return x, hidden_state
+
+class mLSTM(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.W_q = nn.Linear(config.n_embd, config.n_embd)
+        self.W_k = nn.Linear(config.n_embd, config.n_embd)
+        self.W_v = nn.Linear(config.n_embd, config.n_embd)
+        self.W_f = nn.Linear(config.n_embd, config.n_embd)
+        self.W_i = nn.Linear(config.n_embd, config.n_embd)
+        self.o_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.f_bias = nn.Parameter(torch.ones(config.n_embd))
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        q = self.W_q(x)
+        k = self.W_k(x)
+        v = self.W_v(x)
+
+        f = torch.sigmoid(self.W_f(x) + self.f_bias)
+        i = torch.exp(self.W_i(x))
+
+        memory = torch.softmax(torch.matmul(q, k.transpose(1, 2)) / math.sqrt(k.size(-1)), dim=-1)
+        memory = torch.matmul(memory, v)
+
+        memory = f * memory + i * v
+
+        normalizer = f + i
+
+        memory = memory / normalizer
+
+        out = self.o_proj(memory)
+        out = self.dropout(out)
+
+        return out
+
+class xLSTMBlock(nn.Module):
+    def __init__(self, config, ratio_mLSTM=0.5):
+        super().__init__()
+        self.num_sLSTM = int(config.n_layer * (1 - ratio_mLSTM))
+        self.num_mLSTM = config.n_layer - self.num_sLSTM
+        self.sLSTM_blocks = nn.ModuleList([sLSTM(config) for _ in range(self.num_sLSTM)])
+        self.mLSTM_blocks = nn.ModuleList([mLSTM(config) for _ in range(self.num_mLSTM)])
+        self.ln_s = nn.LayerNorm(config.n_embd)
+        self.ln_m = nn.LayerNorm(config.n_embd)
+
+    def forward(self, x, hidden_states):
+        for i in range(self.num_sLSTM):
+            x, hidden_states = self.sLSTM_blocks[i](self.ln_s(x), hidden_states)
+        for i in range(self.num_mLSTM):
+            x = self.mLSTM_blocks[i](self.ln_m(x))
+        return x, hidden_states

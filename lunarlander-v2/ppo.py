@@ -115,14 +115,15 @@ def make_env(env_id, idx, capture_video, run_name):
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id)    
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
     return thunk
 
 #envs = VecPyTorch(DummyVecEnv([make_env(args.gym_id, args.seed+i, i) for i in range(args.num_envs)]), device)
 envs = gym.vector.AsyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(args.num_envs)],
+        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(args.num_envs)]
+        #autoreset_mode = gym.vector.AutoresetMode.SAME_STEP
     )
 assert isinstance(envs.single_action_space, Discrete), "only discrete action space is supported"
 

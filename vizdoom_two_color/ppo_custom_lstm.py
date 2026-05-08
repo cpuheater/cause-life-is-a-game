@@ -7,7 +7,6 @@ from gymnasium import spaces
 from gymnasium.spaces import Discrete, Box
 import cv2
 from vizdoom import GameVariable, Button
-import skimage.transform
 import gymnasium
 
 cv2.ocl.setUseOpenCL(False)
@@ -28,52 +27,7 @@ import os
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnvWrapper
 from typing import Callable, Tuple, Dict, Optional
 import itertools
-import math
-
-
-class CustomLSTM_EXP1(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
-        super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.W = nn.Parameter(torch.Tensor(input_dim, hidden_dim * 4))
-        self.U = nn.Parameter(torch.Tensor(hidden_dim, hidden_dim * 4))
-        self.bias = nn.Parameter(torch.Tensor(hidden_dim * 4))
-        self.init_weights()
-
-    def init_weights(self):
-        stdv = 1.0 / math.sqrt(self.hidden_dim)
-        for weight in self.parameters():
-            weight.data.uniform_(-stdv, stdv)
-
-    def forward(self, x,
-                init_states=None):
-        bs, seq_sz, _ = x.size()
-        hidden_seq = []
-        if init_states is None:
-            h_t, c_t = (torch.zeros(bs, self.hidden_dim).to(x.device),
-                        torch.zeros(bs, self.hidden_dim).to(x.device))
-        else:
-            h_t, c_t = init_states[0].squeeze(0), init_states[1].squeeze(0)
-
-        HS = self.hidden_dim
-        for t in range(seq_sz):
-            x_t = x[:, t, :]
-            gates = x_t @ self.W + h_t @ self.U + self.bias
-            i_t, f_t, g_t, o_t = (
-                torch.sigmoid(gates[:, :HS]), # input gate
-                torch.sigmoid(gates[:, HS:HS*2]), # forget gate
-                torch.tanh(gates[:, HS*2:HS*3]),
-                torch.sigmoid(gates[:, HS*3:]), # output gate
-            )
-            f_t_c_t = f_t * c_t
-            i_t_g_t = i_t * g_t
-            c_t = f_t_c_t + i_t_g_t
-            h_t = o_t * torch.tanh(c_t)
-            hidden_seq.append(h_t.unsqueeze(0))
-        hidden_seq = torch.cat(hidden_seq, dim=0)
-        hidden_seq = hidden_seq.transpose(0, 1).contiguous()
-        return hidden_seq, (h_t, c_t)
+from custom_lstm import LSTMJIT
 
 def get_actions():
     MUTUALLY_EXCLUSIVE_GROUPS = [
@@ -255,13 +209,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(2560, rnn_hidden_size)),
             nn.ReLU()
         )
-        #self.rnn = nn.LSTM(rnn_hidden_size, rnn_hidden_size, batch_first=True)
-        self.rnn = CustomLSTM_EXP1(rnn_hidden_size, rnn_hidden_size)
-        for name, param in self.rnn.named_parameters():
-            if 'bias' in name:
-                nn.init.constant_(param, 0)
-            elif 'weight' in name:
-                nn.init.orthogonal_(param, np.sqrt(2))
+        self.rnn = LSTMJIT(rnn_hidden_size, rnn_hidden_size)
         self.actor = layer_init(nn.Linear(rnn_hidden_size, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(rnn_hidden_size, 1), std=1)
 
@@ -417,7 +365,7 @@ if __name__ == "__main__":
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total-timesteps', type=int, default=25000000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
@@ -480,7 +428,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     #if not args.seed:
-    args.seed = 2#int(time.time())
+    args.seed = int(time.time())
 
 
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -536,8 +484,8 @@ if __name__ == "__main__":
     next_obs = envs.reset()
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
-    rnn_hidden_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
-    rnn_cell_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
+    rnn_hidden_state = torch.zeros((args.num_envs, args.rnn_hidden_size)).to(device)
+    rnn_cell_state = torch.zeros((args.num_envs, args.rnn_hidden_size)).to(device)
 
     for update in range(1, num_updates+1):
         # Annealing the rate if instructed to do so.
@@ -634,7 +582,7 @@ if __name__ == "__main__":
                 if args.norm_adv:
                     b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-                newvalues, rnn_states, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states.unsqueeze(0), b_rnn_cell_states.unsqueeze(0)),
+                newvalues, rnn_states, _, newlogproba, entropy = agent.get_action(b_obs, (b_rnn_hidden_states, b_rnn_cell_states),
                                                                         sequence_length=max_sequence_length, action=b_actions.long())
                 ratio = (newlogproba - b_logprobs).exp()
 

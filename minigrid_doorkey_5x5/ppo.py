@@ -18,6 +18,7 @@ import time
 import random
 import os
 import gymnasium as gym
+import minigrid
 
 
 class ObservationWrapper(gym.ObservationWrapper):
