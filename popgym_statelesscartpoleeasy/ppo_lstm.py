@@ -77,6 +77,9 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+    rnn_hidden_size=256
+    """"""
+    seq_length=64
 
 
 def make_env(env_id, idx, capture_video, run_name):
@@ -170,6 +173,9 @@ if __name__ == "__main__":
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    rnn_hidden_states = torch.zeros((args.num_steps, args.num_envs, args.rnn_hidden_size)).to(device)
+    rnn_cell_states = torch.zeros((args.num_steps, args.num_envs, args.rnn_hidden_size)).to(device)
+
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -177,18 +183,22 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
-
+    rnn_hidden_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
+    rnn_cell_state = torch.zeros((1, args.num_envs, args.rnn_hidden_size)).to(device)
+    
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
-
+        episode_done_indices = [[] for w in range(args.num_envs)]
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
+            rnn_hidden_states[step] = rnn_hidden_state
+            rnn_cell_states[step] = rnn_cell_state
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
@@ -202,6 +212,13 @@ if __name__ == "__main__":
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+            mask = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in next_done]).to(device)
+            rnn_hidden_state = rnn_hidden_state * mask
+            rnn_cell_state = rnn_cell_state * mask
+            indices = torch.nonzero(next_done).flatten().tolist()
+            [episode_done_indices[index].append(step) for index in indices]
+
+
 
             if "final_info" in infos:
                 for info in infos["final_info"]:
