@@ -304,9 +304,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(seed=args.seed+i) for i in range(args.num_envs)],
-    )
+    envs = gym.vector.AsyncVectorEnv([make_env(seed=args.seed+i) for i in range(args.num_envs)],)
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     agent = Agent(envs, rnn_hidden_size=args.rnn_hidden_size, rnn_input_size=args.rnn_hidden_size).to(device)
